@@ -116,3 +116,11 @@ describe.each(representativeVersions.filter(twoHands))('%s cooldowns', (v) => {
     expect(click(f)).toEqual([[useItem(v, 0), ...itemSwing(v, 0)], []])
   })
 })
+
+describe('activatableItemsMobile.json', () => {
+  it('names only items that exist', () => {
+    const list: string[] = require('../src/activatableItemsMobile.json')
+    const data = require('minecraft-data')('1.21.4')
+    expect(list.filter(name => !data.itemsByName[name])).toEqual([])
+  })
+})

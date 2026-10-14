@@ -13,9 +13,13 @@
     "brush",
     "firework_rocket",
     "ender_pearl",
-    "eye_of_ender",
+    "ender_eye",
     "totem_of_undying",
     "carrot_on_a_stick",
     "warped_fungus_on_a_stick",
-    "wind_charge"
+    "wind_charge",
+    "shield",
+    "snowball",
+    "egg",
+    "ominous_bottle"
 ]
