@@ -12,10 +12,27 @@ pnpm add mineflayer-mouse
 
 ## Features
 
+- Sends the serverbound packets the vanilla client sends for a click, on every version from 1.8.8 to 26.3:
+  - the right click tries the main hand, then the off hand, as `Minecraft.startUseItem` does: `use_item_on` / interact for
+    each hand tried, `use_item` when the hand holds an item, stopping at the first hand whose predicted result consumes
+    the click
+  - the left click and the held left click mine as `MultiPlayerGameMode` does: START, a swing every tick, STOP, the
+    destroy delay, creative re-breaking
+  - each version's swing packets, sequence numbers and packet shapes (26.1's single interaction packet, 26.3's punch and
+    shifted player actions)
+- Predicts the client-side results from data generated from the decompiled clients: which blocks, items and entities
+  take a click, and whether the client swings (`src/*Data.json`, made by the generators in `scripts/`)
 - Predict block placement (optimistic update, needed for correct physics on high ping)
 - Block breaking server cancellation
-- Accurate entity raycasting (targeting)
+- Accurate entity raycasting (targeting), with every entity of every version classified by vanilla's `isPickable`
 - Debug logging
+
+## Tests
+
+`pnpm test` runs the unit tests and replays real vanilla client recordings (`test/fixtures/recordings`) through the
+plugin on a fake bot that records every packet and serializes it with minecraft-protocol. The published minecraft-data
+knows versions up to 26.1; `MINECRAFT_DATA_DIR` and `MINECRAFT_PROTOCOL_DIR` point the tests at checkouts that know
+newer ones.
 
 ## Philosophy
 
@@ -65,5 +82,6 @@ bot.rightClickStart()
 - [X] Block placement prediction
 - [X] Raycast, item/block activatable, block prediction overrides
 - [X] Better item activation
-- [ ] Arm animation & use item on block place check world env
-- [ ] Validate packets on item activation on entity
+- [X] Arm animation & use item on block place check world env
+- [X] Validate packets on item activation on entity
+- [ ] Creative pick block (middle click)
