@@ -183,3 +183,17 @@ describe.each(representativeVersions)('%s reach', (v) => {
     }
   })
 })
+
+describe('buttons set without update()', () => {
+  it('a button set directly is clicked on the next tick', () => {
+    const f = createFakeBot('1.20.4').inject().hold('stone')
+    f.lookAtBlock('stone')
+    f.mouse.buttons[2] = true
+    f.tick()
+    expect(f.takeCompact()).toEqual(['use_item_on(hand=0)', 'swing(hand=0)'])
+    f.tick(3)
+    expect(f.takeCompact()).toEqual([])
+    f.tick()
+    expect(f.takeCompact()).toEqual(['use_item_on(hand=0)', 'swing(hand=0)'])
+  })
+})

@@ -258,6 +258,13 @@ export class MouseManager {
   update() {
     this.beforeUpdateChecks()
     const cursor = this.getCursorState()
+    if (this.handleClicks(cursor)) this.useClickedSinceTick = true
+    this.updateButtonStates()
+  }
+
+  /** Minecraft.handleKeybinds' clicks (the button changes since they were last handled); true when a right click ran */
+  private handleClicks(cursor: CursorState) {
+    let usedRightClick = false
     const leftPressed = this.buttons[0] && !this.lastButtons[0]
     const rightPressed = this.buttons[2] && !this.lastButtons[2]
 
@@ -268,11 +275,10 @@ export class MouseManager {
       if (leftPressed) this.instantAttack = this.startAttack(cursor) || this.instantAttack
       if (rightPressed && !this.isDestroying()) {
         this.startUseItem(cursor)
-        this.useClickedSinceTick = true
+        usedRightClick = true
       }
     }
-
-    this.updateButtonStates()
+    return usedRightClick
   }
 
   /** Minecraft.tick: the right click delay, the held right click, continueAttack, the item in use */
@@ -282,6 +288,8 @@ export class MouseManager {
     const cursor = this.getCursorState()
     if (!this.useClickedSinceTick && this.rightClickDelay > 0) this.rightClickDelay--
     this.useClickedSinceTick = false
+    // buttons set without an update() call
+    this.handleClicks(cursor)
 
     if (this.itemBeingUsed && !this.buttons[2]) this.stopUsingItem()
     if (this.buttons[2] && this.rightClickDelay === 0 && !this.itemBeingUsed) {
