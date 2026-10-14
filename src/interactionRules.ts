@@ -37,6 +37,8 @@ export interface HandContext {
   offItem: HandContext['item']
   sneaking: boolean
   gameMode: string
+  /** the block under the crosshair, if any */
+  cursorBlock?: Block | null
 }
 
 /** Block.use (up to 1.20.4) or Block.useItemOn and, for the main hand, useWithoutItem (1.20.5+) */

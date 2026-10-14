@@ -29,3 +29,5 @@ experiment-*
 Thumbs.db
 .idea/
 scripts/entities/entityPickable.detail.json
+scripts/items/itemUse.json
+scripts/items/gen_report.json

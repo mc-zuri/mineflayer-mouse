@@ -539,7 +539,7 @@ describe('MouseManager', () => {
 
     describe('Item Activation', () => {
         it('should handle item activation', () => {
-            bot.heldItem = { name: 'bow' } as any
+            bot.heldItem = { name: 'shield' } as any
 
             RIGHT_START()
             ASSERT_ACTIONS(['activateItem'], true)
@@ -554,7 +554,7 @@ describe('MouseManager', () => {
         })
 
         it('should handle item activation click-click', () => {
-            bot.heldItem = { name: 'bow' } as any
+            bot.heldItem = { name: 'shield' } as any
 
             RIGHT_START()
             ASSERT_ACTIONS(['activateItem'], true)

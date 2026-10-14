@@ -420,7 +420,8 @@ export class MouseManager {
       mainItem,
       offItem,
       sneaking: this.bot.getControlState('sneak'),
-      gameMode: this.bot.game.gameMode
+      gameMode: this.bot.game.gameMode,
+      cursorBlock: this.cursorBlock
     }
   }
 
@@ -648,6 +649,10 @@ export class MouseManager {
     const { result, startsUsing } = predictItemUse(ctx)
     this.bot.activateItem(hand === 1)
     ;(this.bot as any).usingHeldItem = startsUsing
+    // up to 1.14 FishingRodItem.use swings the arm itself (from 1.15 the result's shouldSwing does)
+    if (item.name === 'fishing_rod' && this.versionCompare['<']('1.15')) {
+      this.bot.swingArm(hand === 0 ? 'right' : 'left')
+    }
     if (startsUsing) {
       this.itemBeingUsed = { item, isOffhand: hand === 1, name: item.name }
       this.bot.emit('startUsingItem', item, hand === 1 ? 45 : this.bot.quickBarSlot, hand === 1, -1)
