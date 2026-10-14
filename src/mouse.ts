@@ -7,6 +7,7 @@ import { EventEmitter } from 'events'
 import { debug } from './debug'
 import { getEntityHitLocation, raycastEntity } from './entityRaycast'
 import { getBlockReach } from './botCommon'
+import { getLatestEntityName } from './attackableEntity'
 import { BlockPlacePredictionOverride, botTryPlaceBlockPrediction, directionToVector } from './blockPlacePrediction'
 import { isBlockItem } from './itemInteractions'
 import { consumesAction, HandContext, InteractionResult, predictBlockUse, predictEntityInteract, predictItemUse, predictItemUseOn, VersionCompare } from './interactionRules'
@@ -156,6 +157,11 @@ export class MouseManager {
   itemBeingUsed: ItemUseState | null = null
   /** ticks until the item in use completes (food, drinks), as LivingEntity.useItemRemaining */
   private useItemRemaining = 0
+  /**
+   * LocalPlayer.handsBusy (1.9+): paddling a boat (a movement key held while riding it; from 1.19.4 only as its
+   * driver) keeps clicks from attacking or using. Set at the end of each tick, as rideTick sets it after the clicks.
+   */
+  handsBusy = false
   /** ItemCooldowns: item (cooldown group) name -> ticks left */
   cooldowns = new Map<string, number>()
 
@@ -308,7 +314,21 @@ export class MouseManager {
     if (this.itemBeingUsed && --this.useItemRemaining === 0) {
       this.finishUsingItem()
     }
+    this.handsBusy = this.computeHandsBusy()
     this.updateButtonStates()
+  }
+
+  /** LocalPlayer.rideTick: a movement key held while riding a boat (1.19.4+: the boat the player drives) */
+  private computeHandsBusy() {
+    if (this.versionCompare['<']('1.9')) return false
+    const vehicle: any = (this.bot as any).vehicle ?? (this.bot.entity as any)?.vehicle
+    if (!vehicle) return false
+    const name = getLatestEntityName(vehicle.name ?? '') ?? vehicle.name ?? ''
+    if (!/boat|raft/.test(name)) return false
+    // Entity.getControlledVehicle: the boat's first passenger controls it
+    if (this.versionCompare['>=']('1.19.4') && Array.isArray(vehicle.passengers) && vehicle.passengers.length && vehicle.passengers[0] !== this.bot.entity) return false
+    const c = this.bot.controlState
+    return !!(c.forward || c.back || c.left || c.right)
   }
 
   /** 1.21.11+: the main hand holds an item with the piercing_weapon component (the spears) */
@@ -329,6 +349,8 @@ export class MouseManager {
   /** Minecraft.startAttack: true when the block broke at once */
   private startAttack({ entity, cursorBlock }: CursorState): boolean {
     if (this.missTime > 0) return false
+    // paddling: nothing at all (no swing), continueAttack still runs
+    if (this.handsBusy) return false
     const v = this.versionCompare
     const spectator = this.bot.game.gameMode === 'spectator'
     // 26.1+: a spectator spectates the entity instead of attacking it, without a swing (26.2: a click on nothing too)
@@ -644,6 +666,8 @@ export class MouseManager {
   startUseItem(cursor: Pick<CursorState, 'cursorBlock' | 'entity'>) {
     if (this.isDestroying()) return
     this.rightClickDelay = 4
+    // paddling: the delay is set, nothing is used
+    if (this.handsBusy) return
 
     const { cursorBlock, entity } = cursor
 
