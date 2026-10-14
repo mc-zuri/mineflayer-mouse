@@ -34,3 +34,4 @@ scripts/items/gen_report.json
 scripts/blocks/blockInteractions.json
 scripts/blocks/report.txt
 scripts/blocks/dump/
+scripts/entities/entityInteract.json
