@@ -5,7 +5,7 @@ import PrismarineItem from 'prismarine-item'
 import { Block } from 'prismarine-block'
 import { EventEmitter } from 'events'
 import { debug } from './debug'
-import { raycastEntity } from './entityRaycast'
+import { getEntityHitLocation, raycastEntity } from './entityRaycast'
 import { BlockPlacePredictionOverride, botTryPlaceBlockPrediction, directionToVector } from './blockPlacePrediction'
 import { isItemActivatable } from './itemActivatable'
 import { isBlockActivatable } from './itemBlocksStatic'
@@ -298,22 +298,16 @@ export class MouseManager {
     if (this.bot.supportFeature('armAnimationBeforeUse')) {
       this.bot.swingArm('right')
     }
-    this.bot._client.write('use_entity', {
-      target: entity.id,
-      mouse: 2,
-      // todo do not fake
-      x: 0.581_012_585_759_162_9,
-      y: 0.581_012_585_759_162_9,
-      z: 0.581_012_585_759_162_9,
-      sneaking: this.bot.getControlState('sneak'),
-      hand: 0
-    })
-    this.bot._client.write('use_entity', {
-      target: entity.id,
-      mouse: 0,
-      sneaking: this.bot.getControlState('sneak'),
-      hand: 0
-    })
+    // the hit location relative to the entity, as MultiPlayerGameMode.interactAt / interact (26.1+) send it
+    const location = getEntityHitLocation(this.bot, entity)
+    const sneaking = this.bot.getControlState('sneak')
+    if (this.bot.supportFeature('useEntityHasLocation')) {
+      // 26.1+: one ServerboundInteractPacket carries the location
+      this.bot._client.write('use_entity', { target: entity.id, hand: 0, location: { x: location.x, y: location.y, z: location.z }, sneaking })
+    } else {
+      this.bot._client.write('use_entity', { target: entity.id, mouse: 2, x: location.x, y: location.y, z: location.z, sneaking, hand: 0 })
+      this.bot._client.write('use_entity', { target: entity.id, mouse: 0, sneaking, hand: 0 })
+    }
     if (!this.bot.supportFeature('armAnimationBeforeUse')) {
       this.bot.swingArm('right')
     }

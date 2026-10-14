@@ -67,3 +67,35 @@ export function getEntitySize(data: MinecraftData.IndexedData, entity: Entity): 
     }
     return { width: entity.width, height: entity.height }
 }
+
+/**
+ * Where the crosshair ray meets the entity's box, relative to the entity's position: the location vanilla sends with an
+ * interaction (`hitResult.getLocation().subtract(entity.getX(), entity.getY(), entity.getZ())`). From inside the box it
+ * is the eye position, as ProjectileUtil.getEntityHitResult gives.
+ */
+export function getEntityHitLocation(bot: Bot, entity: Entity): Vec3 {
+    const eye = bot.entity.position.offset(0, getBotEyeHeight(bot), 0)
+    const { yaw, pitch } = bot.entity
+    const dir = new Vec3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch)).normalize()
+    const { width, height } = getEntitySize(MinecraftData(bot.version), entity)
+    const w = (width ?? 0) / 2
+    const box = [entity.position.x - w, entity.position.y, entity.position.z - w, entity.position.x + w, entity.position.y + (height ?? 0), entity.position.z + w]
+    const start = [eye.x, eye.y, eye.z]
+    const d = [dir.x, dir.y, dir.z]
+    let tNear = 0
+    let tFar = Infinity
+    for (let axis = 0; axis < 3; axis++) {
+        if (Math.abs(d[axis]!) < 1e-12) {
+            if (start[axis]! < box[axis]! || start[axis]! > box[axis + 3]!) tNear = Infinity
+            continue
+        }
+        let t1 = (box[axis]! - start[axis]!) / d[axis]!
+        let t2 = (box[axis + 3]! - start[axis]!) / d[axis]!
+        if (t1 > t2) [t1, t2] = [t2, t1]
+        tNear = Math.max(tNear, t1)
+        tFar = Math.min(tFar, t2)
+    }
+    // the ray misses (a stale target): the eye position stands in, as it does from inside the box
+    if (tNear > tFar || tNear === Infinity) return eye.minus(entity.position)
+    return eye.plus(dir.scaled(tNear)).minus(entity.position)
+}

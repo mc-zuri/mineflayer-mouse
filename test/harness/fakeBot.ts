@@ -13,6 +13,7 @@ import PrismarineItem, { Item } from 'prismarine-item'
 import { createSerializer } from 'minecraft-protocol'
 import { Bot } from 'mineflayer'
 import { inject, MouseManager } from '../../src/mouse'
+import { getLatestEntityName } from '../../src/attackableEntity'
 
 export interface SentPacket {
   tick: number
@@ -255,7 +256,9 @@ export class FakeBot {
   }
 
   /** puts an entity right in front of the player, under the crosshair (the player looks along -z... yaw 0 looks to -z) */
-  lookAtEntity(name: string, { id = 2, metadata = [] as any[] } = {}) {
+  lookAtEntity(latestName: string, { id = 2, metadata = [] as any[] } = {}) {
+    // the version's own name for it (1.8 - 1.10 "Cow")
+    const name = this.data.entitiesByName[latestName] ? latestName : this.data.entitiesArray.find(e => getLatestEntityName(e.name) === latestName)?.name ?? latestName
     const data = this.data.entitiesByName[name]
     if (!data) throw new Error(`no entity ${name} in ${this.version}`)
     const eye = this.bot.entity.position.offset(0, 1.62, 0)
