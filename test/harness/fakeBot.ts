@@ -140,7 +140,8 @@ export class FakeBot {
     bot.lookAt = async () => {}
     bot.sleep = async () => {}
     ;(bot as any)._nextInteractionSequence = () => ++fake.sequence
-    bot._client = { write: (name: string, params: any) => fake.write(name, params), on: () => {} } as any
+    // the client: written packets are recorded, tests emit the server's packets on it
+    bot._client = Object.assign(new EventEmitter(), { write: (name: string, params: any) => fake.write(name, params) }) as any
 
     // --- the mineflayer methods the plugin calls, as the web client's mineflayer sends them ---
 

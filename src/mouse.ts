@@ -8,6 +8,7 @@ import { debug } from './debug'
 import { getEntityHitLocation, raycastEntity } from './entityRaycast'
 import { getBlockReach } from './botCommon'
 import { getLatestEntityName } from './attackableEntity'
+import { WorldBorderTracker } from './worldBorder'
 import { BlockPlacePredictionOverride, botTryPlaceBlockPrediction, directionToVector } from './blockPlacePrediction'
 import { isBlockItem } from './itemInteractions'
 import { consumesAction, HandContext, InteractionResult, predictBlockUse, predictEntityInteract, predictItemUse, predictItemUseOn, VersionCompare } from './interactionRules'
@@ -162,6 +163,8 @@ export class MouseManager {
    * driver) keeps clicks from attacking or using. Set at the end of each tick, as rideTick sets it after the clicks.
    */
   handsBusy = false
+  /** the world border, from the server's packets */
+  worldBorder!: WorldBorderTracker
   /** ItemCooldowns: item (cooldown group) name -> ticks left */
   cooldowns = new Map<string, number>()
 
@@ -174,6 +177,7 @@ export class MouseManager {
       ...defaultBlockHandlers,
       ...(settings.blockInteractionHandlers ?? {})
     }
+    this.worldBorder = new WorldBorderTracker(bot, () => this.versionCompare)
     this.initBotEvents()
 
     // patch mineflayer
@@ -315,6 +319,7 @@ export class MouseManager {
       this.finishUsingItem()
     }
     this.handsBusy = this.computeHandsBusy()
+    this.worldBorder.tick()
     this.updateButtonStates()
   }
 
@@ -517,6 +522,7 @@ export class MouseManager {
 
   private startDestroyBlock(block: Block): boolean {
     if (this.blockActionRestricted(block)) return false
+    if (!this.worldBorder.isWithinBounds(block.position.x, block.position.z)) return false
     const face: number = (block as any).face ?? 1
     if (this.isCreativeDestroy()) {
       this.writeDig('start', block.position, face)
@@ -561,10 +567,9 @@ export class MouseManager {
       this.destroyDelay--
       return true
     }
-    if (this.isCreativeDestroy()) {
-      // creative breaks the block under the crosshair every 5 ticks while held
+    // creative breaks the block under the crosshair every 5 ticks while held, inside the world border
+    if (this.isCreativeDestroy() && this.worldBorder.isWithinBounds(block.position.x, block.position.z)) {
       this.destroyDelay = 5
-      if (this.blockActionRestricted(block)) return true
       this.writeDig('start', block.position, (block as any).face ?? 1)
       this.destroyBlockLocally(block)
       return true
@@ -677,6 +682,8 @@ export class MouseManager {
 
     const v = this.versionCompare
     const hands: Array<0 | 1> = this.bot.supportFeature('doesntHaveOffHandSlot') ? [0] : [0, 1]
+    // 1.18+: an entity outside the world border ends the click
+    if (entity && v['>=']('1.18') && !this.worldBorder.isWithinBounds(entity.position.x, entity.position.z)) return
     for (const hand of hands) {
       const item = this.itemInHand(hand)
       if (entity) {
@@ -778,6 +785,9 @@ export class MouseManager {
     const delta = cursorBlock['intersect'].minus(cursorBlock.position)
     const faceNum: number = cursorBlock['face']
     const direction = directionToVector[faceNum]!
+
+    // a block outside the world border: FAIL without the packet
+    if (!this.worldBorder.isWithinBounds(cursorBlock.position.x, cursorBlock.position.z)) return 'fail'
 
     let result: InteractionResult
     if (this.bot.game.gameMode === 'spectator') {
