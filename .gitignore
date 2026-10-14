@@ -31,3 +31,6 @@ Thumbs.db
 scripts/entities/entityPickable.detail.json
 scripts/items/itemUse.json
 scripts/items/gen_report.json
+scripts/blocks/blockInteractions.json
+scripts/blocks/report.txt
+scripts/blocks/dump/

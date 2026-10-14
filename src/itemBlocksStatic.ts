@@ -1,3 +1,5 @@
+// The hand-written list of blocks that take a right click, kept for botTryPlaceBlockPrediction and as a public
+// helper; the click itself follows blockInteractionsData.json (src/blockInteractions.ts), generated from vanilla.
 // these have
 // protected InteractionResult useWithoutItem
 // but not protected InteractionResult useItemOn
