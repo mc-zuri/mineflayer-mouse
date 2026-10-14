@@ -94,3 +94,25 @@ describe.each(representativeVersions.filter(twoHands))('%s item use', (v) => {
     expect(click(f)).toEqual([[useItem(v, 0), useItem(v, 1), ...itemSwing(v, 1)], []])
   })
 })
+
+describe.each(representativeVersions.filter(twoHands))('%s cooldowns', (v) => {
+  it('an ender pearl on cooldown still sends use_item, passes, and the off hand is tried', () => {
+    const f = createFakeBot(v).inject().hold('ender_pearl', 'snowball')
+    f.lookAtNothing()
+    f.pressRight()
+    expect(f.takeCompact()).toEqual([useItem(v, 0), ...itemSwing(v, 0)])
+    // held: the repeat 4 ticks later finds the pearl on its 20 tick cooldown
+    f.tick(5)
+    expect(f.takeCompact()).toEqual([useItem(v, 0), useItem(v, 1), ...itemSwing(v, 1)])
+    f.releaseRight()
+  })
+
+  it('a cooldown the server sets is kept', () => {
+    const f = createFakeBot(v).inject().hold('ender_pearl')
+    f.mouse.cooldowns.set('ender_pearl', 3)
+    f.lookAtNothing()
+    expect(click(f)).toEqual([[useItem(v, 0)], []])
+    f.tick(3)
+    expect(click(f)).toEqual([[useItem(v, 0), ...itemSwing(v, 0)], []])
+  })
+})

@@ -154,6 +154,8 @@ export class MouseManager {
   itemBeingUsed: ItemUseState | null = null
   /** ticks until the item in use completes (food, drinks), as LivingEntity.useItemRemaining */
   private useItemRemaining = 0
+  /** ItemCooldowns: item (cooldown group) name -> ticks left */
+  cooldowns = new Map<string, number>()
 
   swingTimeout: any = null
   private blockHandlers: Record<string, BlockInteractionHandler>
@@ -225,6 +227,14 @@ export class MouseManager {
       }
     })
 
+    // ItemCooldowns: the server's cooldowns (an item id before 1.21.2, a cooldown group after)
+    this.bot._client.on('set_cooldown', (packet: { itemID?: number, cooldownGroup?: string, cooldownTicks: number }) => {
+      const name = packet.cooldownGroup?.replace(/^minecraft:/, '') ?? MinecraftData(this.bot.version).items[packet.itemID!]?.name
+      if (!name) return
+      if (packet.cooldownTicks > 0) this.cooldowns.set(name, packet.cooldownTicks)
+      else this.cooldowns.delete(name)
+    })
+
     // LivingEntity.updatingUsingItem: another item in the hand stops using it, locally (the server sees the slot change)
     this.bot.on('heldItemChanged' as any, () => {
       if (this.itemBeingUsed && !this.itemBeingUsed.isOffhand) {
@@ -279,6 +289,10 @@ export class MouseManager {
     this.continueAttack(this.buttons[0] && !this.instantAttack, cursor)
     this.instantAttack = false
     if (this.missTime > 0) this.missTime--
+    for (const [name, ticks] of this.cooldowns) {
+      if (ticks <= 1) this.cooldowns.delete(name)
+      else this.cooldowns.set(name, ticks - 1)
+    }
 
     // LivingEntity.updateUsingItem: food and drinks complete after their use duration
     if (this.itemBeingUsed && --this.useItemRemaining === 0) {
@@ -714,7 +728,8 @@ export class MouseManager {
       const suppressUsingBlock = ctx.sneaking && (!!mainItem || !!offItem)
       result = suppressUsingBlock ? 'pass' : predictBlockUse(ctx, cursorBlock)
       if (!consumesAction(result) && result !== 'fail') {
-        if (item) {
+        // an item on cooldown is not used on the block
+        if (item && !this.cooldowns.has(item.name)) {
           let predicted = false
           result = predictItemUseOn(ctx, cursorBlock, () => {
             if (hand !== 0) return true
@@ -797,8 +812,11 @@ export class MouseManager {
     if (this.bot.game.gameMode === 'spectator') return 'pass'
     const ctx = this.handContext(hand)
     const item = ctx.item!
-    const { result, startsUsing } = predictItemUse(ctx)
+    // on cooldown the packet still goes, and the result is PASS (the off hand is tried next)
+    const onCooldown = this.cooldowns.has(item.name)
+    const { result, startsUsing } = onCooldown ? { result: 'pass' as InteractionResult, startsUsing: false } : predictItemUse(ctx)
     this.bot.activateItem(hand === 1)
+    if (consumesAction(result)) this.startClientCooldown(item.name)
     ;(this.bot as any).usingHeldItem = startsUsing
     // up to 1.14 FishingRodItem.use swings the arm itself (from 1.15 the result's shouldSwing does)
     if (item.name === 'fishing_rod' && this.versionCompare['<']('1.15')) {
@@ -812,6 +830,15 @@ export class MouseManager {
       this.bot.emit('startUsingItem', item, hand === 1 ? 45 : this.bot.quickBarSlot, hand === 1, -1)
     }
     return result
+  }
+
+  /** the cooldowns the client starts itself when the item is used */
+  private startClientCooldown(name: string) {
+    const v = this.versionCompare
+    // EnderpearlItem.use (1.9+), WindChargeItem (use_cooldown from 1.21.2), InstrumentItem (the horn's use duration)
+    if (name === 'ender_pearl' && v['>=']('1.9')) this.cooldowns.set(name, 20)
+    if (name === 'wind_charge' && v['>=']('1.21.2')) this.cooldowns.set(name, 10)
+    if (name === 'goat_horn') this.cooldowns.set(name, 140)
   }
 
   /** kept for API compatibility: sends one use_item_on for the hand, as vanilla's useItemOn does */
