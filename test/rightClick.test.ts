@@ -3,6 +3,7 @@
  * clients dictate (see the version notes in each case). The fake bot records every serverbound packet.
  */
 import { describe, it, expect } from 'vitest'
+import { Vec3 } from 'vec3'
 import { createFakeBot, FakeBot } from './harness/fakeBot'
 import { representativeVersions, atLeast } from './harness/versions'
 
@@ -165,5 +166,20 @@ describe.each(representativeVersions)('%s right click', (v) => {
     expect(click(f)).toEqual(['use_item_on(hand=0)', ...(atLeast(v, '1.21.2') ? [] : swing(v, 0))])
     f.lookAtNothing()
     expect(click(f)).toEqual([])
+  })
+})
+
+describe.each(representativeVersions)('%s reach', (v) => {
+  it('a block beyond 4.5 blocks is out of reach in survival (the click is in the air), within reach in creative', () => {
+    const eye = new Vec3(0.5, 64 + 1.62, 0.5)
+    for (const [gameMode, reached] of [['survival', false], ['creative', true]] as const) {
+      const f = createFakeBot(v, { gameMode }).inject().hold('snowball')
+      // the hit point 4.8 blocks in front of the eyes
+      f.lookAtBlock('stone', { position: new Vec3(0, 65, -5), face: 3, hit: eye.offset(0, 0, -4.8).minus(new Vec3(0, 65, -5)) })
+      f.pressRight()
+      const packets = f.takeCompact()
+      f.releaseRight()
+      expect(packets[0]).toBe(reached ? 'use_item_on(hand=0)' : (atLeast(v, '1.9') ? 'use_item(hand=0)' : 'use_item(1.8)'))
+    }
   })
 })

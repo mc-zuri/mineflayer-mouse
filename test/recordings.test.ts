@@ -22,6 +22,7 @@ interface Fixture {
   name: string
   version: string
   gamemode: string
+  position?: [number, number, number] | null
   food?: number
   selected: number
   inventory: Record<string, [string, number]>
@@ -67,6 +68,7 @@ const IGNORED = new Set(['held_item_slot', 'position_look', 'position', 'look', 
 function replay(version: string, fixture: Fixture) {
   const f = createFakeBot(version, { gameMode: fixture.gamemode as any, food: fixture.food })
   f.inject()
+  if (fixture.position) f.bot.entity.position = new Vec3(...fixture.position)
   for (const [index, [name, count]] of Object.entries(fixture.inventory)) {
     try {
       f.bot.inventory.slots[windowSlot(+index)] = f.makeItem(name, count)

@@ -192,6 +192,8 @@ function importCase (file, version) {
     version,
     source: rec.source ?? null,
     gamemode: rec.gamemode ?? rec.start?.gameMode ?? 'survival',
+    // the player's feet, where the blocks are measured from
+    position: rec.start?.pos ?? rec.at ?? null,
     // the recordings keep no health packets: a scenario that gives the hunger effect leaves the player hungry
     food: rec.setup?.food ?? (JSON.stringify(rec.steps ?? []).includes('minecraft:hunger') ? 19 : undefined),
     selected: rec.setup?.selected ?? 0,

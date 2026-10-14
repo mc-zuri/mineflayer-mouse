@@ -6,6 +6,7 @@ import { Block } from 'prismarine-block'
 import { EventEmitter } from 'events'
 import { debug } from './debug'
 import { getEntityHitLocation, raycastEntity } from './entityRaycast'
+import { getBlockReach } from './botCommon'
 import { BlockPlacePredictionOverride, botTryPlaceBlockPrediction, directionToVector } from './blockPlacePrediction'
 import { consumesAction, HandContext, InteractionResult, predictBlockUse, predictEntityInteract, predictItemUse, predictItemUseOn, VersionCompare } from './interactionRules'
 import MinecraftData from 'minecraft-data'
@@ -377,7 +378,8 @@ export class MouseManager {
   getCursorState(): CursorState {
     const entity = this.getCachedRaycastEntity()
 
-    let cursorBlock = this.bot.entity ? this.bot.blockAtCursor(5) : null
+    // the block reach: 4.5, 5 in creative (or the block_interaction_range attribute)
+    let cursorBlock = this.bot.entity ? this.bot.blockAtCursor(getBlockReach(this.bot)) : null
     if (entity) cursorBlock = null
 
     // the block left click would start mining (Player.blockActionRestricted)

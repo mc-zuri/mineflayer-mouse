@@ -2,7 +2,7 @@ import { Bot } from 'mineflayer'
 import { Entity } from 'prismarine-entity'
 import { Vec3 } from 'vec3'
 import * as iterators from 'prismarine-world/src/iterators'
-import { getBotEyeHeight } from './botCommon'
+import { getBotEyeHeight, getBlockReach, getEntityReach } from './botCommon'
 import { Shape } from 'prismarine-world/types/iterators'
 import { isEntityAttackable } from './attackableEntity'
 import MinecraftData from 'minecraft-data'
@@ -12,10 +12,12 @@ export function raycastEntity(bot: Bot, maxDistance?: number) {
 
     const minecraftData = MinecraftData(bot.version)
 
-    // TODO shouldn't .5 be added to maxDistance?
-    maxDistance ??= bot.game.gameMode === 'creative' ? 5 : 3
-    const block = bot.blockAtCursor(maxDistance)
-    maxDistance = block?.['intersect'].distanceTo(bot.entity.position) ?? maxDistance
+    const eye = bot.entity.position.offset(0, getBotEyeHeight(bot), 0)
+    maxDistance ??= getEntityReach(bot)
+    // a block closer than the entity hides it (GameRenderer.pick)
+    const block = bot.blockAtCursor(getBlockReach(bot))
+    const blockDistance = block?.['intersect'] ? block['intersect'].distanceTo(eye) : Infinity
+    maxDistance = Math.min(maxDistance, blockDistance)
 
     const entities = bot.entities
     const playerGameMode = (entity: Entity) => {
@@ -24,7 +26,7 @@ export function raycastEntity(bot: Bot, maxDistance?: number) {
     }
 
     const dir = new Vec3(-Math.sin(bot.entity.yaw) * Math.cos(bot.entity.pitch), Math.sin(bot.entity.pitch), -Math.cos(bot.entity.yaw) * Math.cos(bot.entity.pitch))
-    const iterator = new iterators.RaycastIterator(bot.entity.position.offset(0, getBotEyeHeight(bot), 0), dir.normalize(), maxDistance)
+    const iterator = new iterators.RaycastIterator(eye, dir.normalize(), maxDistance)
 
     let result: Entity | null = null
     let minDist = maxDistance!
@@ -43,7 +45,7 @@ export function raycastEntity(bot: Bot, maxDistance?: number) {
             const entityDir = entity.position.minus(bot.entity.position) // Can be combined into 1 line
             const sign = Math.sign(entityDir.dot(dir))
             if (sign !== -1) {
-                const dist = bot.entity.position.distanceTo(intersect.pos)
+                const dist = eye.distanceTo(intersect.pos)
                 if (dist < minDist) {
                     if (isEntityAttackable(minecraftData, entity, playerGameMode)) {
                         minDist = dist

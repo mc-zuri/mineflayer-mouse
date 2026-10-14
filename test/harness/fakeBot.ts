@@ -117,7 +117,13 @@ export class FakeBot {
     const slots: (Item | null)[] = new Array(46).fill(null)
     bot.inventory = { slots } as any
     Object.defineProperty(bot, 'heldItem', { get: () => slots[36 + bot.quickBarSlot] ?? null, configurable: true })
-    bot.blockAtCursor = () => fake.cursorBlock as any
+    // the block under the crosshair, if within the reach asked for (from the eyes to the hit point)
+    bot.blockAtCursor = ((maxDistance = 256) => {
+      const block: any = fake.cursorBlock
+      if (!block) return null
+      const eye = bot.entity.position.offset(0, bot.controlState.sneak ? 1.27 : 1.62, 0)
+      return block.intersect && block.intersect.distanceTo(eye) > maxDistance ? null : block
+    }) as any
     bot.canDigBlock = () => true
     // prismarine-block's dig time, as mineflayer's bot.digTime computes it (without enchantments and effects)
     bot.digTime = (block: any) => block.digTime?.(bot.heldItem?.type ?? null, bot.game.gameMode === 'creative', false, !bot.entity.onGround, [], {}) ?? 1000
