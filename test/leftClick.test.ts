@@ -167,3 +167,40 @@ describe.each(representativeVersions)('%s left click', (v) => {
     expect(f.takeCompact()).toEqual([])
   })
 })
+
+describe.each(representativeVersions)('%s spectator and spear left click', (v) => {
+  it('spectator: attacks (with a swing up to 1.21.10) before 26.1, spectates the entity after', () => {
+    const f = createFakeBot(v, { gameMode: 'spectator' }).inject().hold(null)
+    const pig = f.lookAtEntity('pig')
+    f.pressLeft().tick()
+    const packets = f.take()
+    if (atLeast(v, '26.2')) {
+      expect(packets.map(p => [p.name, p.params])).toEqual([['spectator_action', { entityId: pig.id + 1 }]])
+    } else if (atLeast(v, '26.1')) {
+      expect(packets.map(p => [p.name, p.params])).toEqual([['spectate_entity', { entityId: pig.id }]])
+    } else {
+      const names = packets.map(p => p.name)
+      expect(names[atLeast(v, '1.9') ? 0 : 1]).toBe('use_entity')
+      expect(names.includes('arm_animation')).toBe(!atLeast(v, '1.21.11'))
+    }
+  })
+
+  it('spectator: a click on a block mines nothing', () => {
+    const f = createFakeBot(v, { gameMode: 'spectator' }).inject().hold(null)
+    f.lookAtBlock('stone')
+    f.pressLeft().tick(3)
+    const names = f.take().map(p => p.name)
+    expect(names.filter(n => n === 'block_dig')).toEqual([])
+    // 26.2+: a click on nothing to spectate
+    if (atLeast(v, '26.2')) expect(names).toEqual(['spectator_action'])
+  })
+
+  it.runIf(atLeast(v, '1.21.11'))('a spear stabs (STAB at the origin) instead of mining, and holding does nothing', () => {
+    const f = createFakeBot(v).inject().hold('iron_spear')
+    f.lookAtBlock('stone')
+    f.pressLeft().tick(5)
+    const packets = f.take()
+    expect(packets.map(p => p.name)).toEqual(atLeast(v, '26.3') ? ['block_dig'] : ['block_dig', 'arm_animation'])
+    expect(packets[0]!.params).toMatchObject({ status: atLeast(v, '26.3') ? 8 : 7, location: { x: 0, y: 0, z: 0 }, face: 0, sequence: 0 })
+  })
+})

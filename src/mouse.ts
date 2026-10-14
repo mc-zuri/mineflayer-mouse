@@ -301,6 +301,13 @@ export class MouseManager {
     this.updateButtonStates()
   }
 
+  /** 1.21.11+: the main hand holds an item with the piercing_weapon component (the spears) */
+  private holdsPiercingWeapon() {
+    const item: any = this.bot.heldItem
+    if (!item || this.versionCompare['<']('1.21.11')) return false
+    return item.componentMap?.has?.('piercing_weapon') || /_spear$/.test(item.name)
+  }
+
   /** LocalPlayer.swing for a left click: the swing packet (26.3: a punch) */
   private swingAttack() {
     if (this.versionCompare['>=']('26.3')) this.bot._client.write('punch', {})
@@ -314,8 +321,23 @@ export class MouseManager {
     if (this.missTime > 0) return false
     const v = this.versionCompare
     const spectator = this.bot.game.gameMode === 'spectator'
-    // 26.1+: a spectator spectates instead of attacking, without a swing
-    if (spectator && v['>=']('26.1')) return false
+    // 26.1+: a spectator spectates the entity instead of attacking it, without a swing (26.2: a click on nothing too)
+    if (spectator && v['>=']('26.1')) {
+      // ByteBufCodecs.OPTIONAL_VAR_INT (minecraft-data types it as a plain varint): 0 for none, else the id + 1
+      if (v['>=']('26.2')) this.bot._client.write('spectator_action', { entityId: entity ? entity.id + 1 : 0 })
+      else if (entity) this.bot._client.write('spectate_entity', { entityId: entity.id })
+      return true
+    }
+    // 1.21.11+: a spear (PIERCING_WEAPON) stabs instead of attacking or mining
+    if (!spectator && this.holdsPiercingWeapon()) {
+      // ServerboundPlayerActionPacket.Action.STAB (26.3 inserted CHANGE_DESTROY_DIRECTION before it), at the origin
+      this.bot._client.write('block_dig', { status: v['>=']('26.3') ? 8 : 7, location: new Vec3(0, 0, 0), face: 0, sequence: 0 })
+      // the swing packet; 26.3 swings locally without a punch
+      if (v['<']('26.3')) this.bot.swingArm('right')
+      this.bot.emit('botArmSwingStart', 'right')
+      this.bot.emit('botArmSwingEnd', 'right')
+      return true
+    }
     if (entity) {
       this.bot.emit('botArmSwingStart', 'right')
       this.bot.emit('botArmSwingEnd', 'right')
@@ -341,6 +363,8 @@ export class MouseManager {
   private continueAttack(down: boolean, { cursorBlock }: CursorState) {
     if (!down) this.missTime = 0
     if (this.missTime > 0 || this.itemBeingUsed) return
+    // 1.21.11+: holding a spear does nothing here, not even stopDestroyBlock
+    if (this.holdsPiercingWeapon()) return
     if (down && cursorBlock) {
       if (cursorBlock.type !== 0 && cursorBlock.name !== 'air' && this.continueDestroyBlock(cursorBlock)) {
         this.swingAttack()
