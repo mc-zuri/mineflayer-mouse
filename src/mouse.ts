@@ -7,13 +7,13 @@ import { EventEmitter } from 'events'
 import { debug } from './debug'
 import { getEntityHitLocation, raycastEntity } from './entityRaycast'
 import { BlockPlacePredictionOverride, botTryPlaceBlockPrediction, directionToVector } from './blockPlacePrediction'
-import { isItemActivatable } from './itemActivatable'
-import { isBlockActivatable } from './itemBlocksStatic'
+import { consumesAction, HandContext, InteractionResult, predictBlockUse, predictEntityInteract, predictItemUse, predictItemUseOn, VersionCompare } from './interactionRules'
 import MinecraftData from 'minecraft-data'
 
 export interface BlockInteractionHandler {
   test: (block: Block) => boolean
-  handle: (block: Block, bot: Bot) => void
+  /** return false to let the vanilla click go on */
+  handle: (block: Block, bot: Bot) => void | boolean | Promise<void>
 }
 
 export interface ItemUseState {
@@ -51,9 +51,10 @@ export interface BotPluginSettings {
 const defaultBlockHandlers: Record<string, BlockInteractionHandler> = {
   bed: {
     test: (block) => block.name === 'bed' || block.name.endsWith('_bed'),
-    handle: async (block, bot) => {
+    // the click itself goes to the server as vanilla sends it; the server puts the player to bed
+    handle: (block, bot) => {
       bot.emit('goingToSleep', block)
-      await bot.sleep(block)
+      return false
     }
   }
 }
@@ -291,71 +292,52 @@ export class MouseManager {
     })
   }
 
+  /** a right click on the entity, as startUseItem does it */
   activateEntity(entity: Entity) {
-    this.bot.emit('botArmSwingStart', 'right')
-    this.bot.emit('botArmSwingEnd', 'right')
-    // mineflayer has completely wrong implementation of this action
-    if (this.bot.supportFeature('armAnimationBeforeUse')) {
-      this.bot.swingArm('right')
-    }
-    // the hit location relative to the entity, as MultiPlayerGameMode.interactAt / interact (26.1+) send it
-    const location = getEntityHitLocation(this.bot, entity)
-    const sneaking = this.bot.getControlState('sneak')
-    if (this.bot.supportFeature('useEntityHasLocation')) {
-      // 26.1+: one ServerboundInteractPacket carries the location
-      this.bot._client.write('use_entity', { target: entity.id, hand: 0, location: { x: location.x, y: location.y, z: location.z }, sneaking })
-    } else {
-      this.bot._client.write('use_entity', { target: entity.id, mouse: 2, x: location.x, y: location.y, z: location.z, sneaking, hand: 0 })
-      this.bot._client.write('use_entity', { target: entity.id, mouse: 0, sneaking, hand: 0 })
-    }
-    if (!this.bot.supportFeature('armAnimationBeforeUse')) {
-      this.bot.swingArm('right')
-    }
+    this.startUseItem({ cursorBlock: null, entity })
   }
 
   beforeUpdateChecks() { }
 
   update() {
     this.beforeUpdateChecks()
-    const { cursorBlock, cursorBlockDiggable, cursorChanged, cursorPositionChanged, entity } = this.getCursorState()
+    const cursor = this.getCursorState()
+    const { cursorBlock, cursorBlockDiggable, cursorChanged, cursorPositionChanged, entity } = cursor
+    const leftPressed = this.buttons[0] && !this.lastButtons[0]
+    const rightPressed = this.buttons[2] && !this.lastButtons[2]
 
-    // Handle item deactivation
-    if (this.itemBeingUsed && !this.buttons[2]) {
-      this.stopUsingItem()
+    // Minecraft.handleKeybinds: while using an item, releasing the use key releases it and clicks do nothing
+    if (this.itemBeingUsed) {
+      if (!this.buttons[2]) this.stopUsingItem()
+    } else {
+      if (leftPressed) this.startAttack(cursor)
+      if (rightPressed) this.startUseItem(cursor)
+    }
+    // held right click repeats every 4 ticks
+    if (this.buttons[2] && !rightPressed && this.rightClickDelay >= 4 && !this.itemBeingUsed) {
+      this.startUseItem(cursor)
     }
 
-    // Handle entity interactions
-    if (entity) {
-      if (this.buttons[0] && !this.lastButtons[0]) {
-        // Left click - attack
-        this.bot.emit('botArmSwingStart', 'right')
-        this.bot.emit('botArmSwingEnd', 'right')
-        this.bot.attack(entity) // already swings to servers
-      } else if (this.buttons[2] && !this.lastButtons[2]) {
-        // Right click - interact
-        if (isVillagerForTrade(entity) && typeof this.bot.openVillager === 'function' && this.settings.useMineflayerInteractMethods !== false) {
-          void this.bot.openVillager!(entity).catch((err: unknown) => this.bot.emit('error', err instanceof Error ? err : new Error(String(err))))
-        } else {
-          // Prevent activation of vehicles (minecarts/boats) to avoid getting stuck
-          const preventVehicle = this.settings.preventVehicleInteraction !== false
-          if (preventVehicle && isProblematicVehicleEntity(entity)) {
-            // Skip activation with vehicles to prevent getting stuck inside them
-            // which could cause server kick for flying
-            console.warn(`Prevented vehicle interaction with ${entity.name} to avoid getting stuck because of Mineflayer bug`)
-          } else {
-            this.activateEntity(entity)
-          }
-        }
-      }
-    } else {
-      if (this.buttons[2] && (this.rightClickDelay >= 4 || !this.lastButtons[2])) {
-        this.updatePlaceInteract(cursorBlock)
-      }
-
+    if (!entity) {
       this.updateBreaking(cursorBlock, cursorBlockDiggable, cursorChanged, cursorPositionChanged)
     }
 
     this.updateButtonStates()
+  }
+
+  /** Minecraft.startAttack for an entity or a miss; a block is left to the breaking logic */
+  private startAttack({ entity, cursorBlock, cursorBlockDiggable }: CursorState) {
+    if (entity) {
+      this.bot.emit('botArmSwingStart', 'right')
+      this.bot.emit('botArmSwingEnd', 'right')
+      this.bot.attack(entity) // sends the attack, then the swing (1.8: swing first; 26.3: a punch)
+      return
+    }
+    if (cursorBlock && cursorBlockDiggable) return
+    // a miss, or a block that cannot be broken here (adventure): one swing per click
+    this.bot.swingArm('right')
+    this.bot.emit('botArmSwingStart', 'right')
+    this.bot.emit('botArmSwingEnd', 'right')
   }
 
   getCursorState(): CursorState {
@@ -406,44 +388,230 @@ export class MouseManager {
     return entity
   }
 
-  async placeBlock(cursorBlock: Block, direction: Vec3, delta: Vec3, offhand: boolean, forceLook: 'ignore' | 'lookAt' | 'lookAtForce' = 'ignore', doClientSwing = true) {
-    const handToPlaceWith = offhand ? 1 : 0
-    if (offhand && this.bot.supportFeature('doesntHaveOffHandSlot')) {
-      return
+
+  // --- vanilla right click: Minecraft.startUseItem and MultiPlayerGameMode.useItemOn / useItem / interact ---
+
+  private get versionCompare(): VersionCompare {
+    return ((this.bot as any).registry?.version ?? MinecraftData(this.bot.version).version) as VersionCompare
+  }
+
+  private ownSequence = 0
+  /** the block prediction sequence (1.19+), shared with mineflayer's digging when it counts them */
+  private nextSequence(): number {
+    const next = (this.bot as any)._nextInteractionSequence
+    return typeof next === 'function' ? next() : ++this.ownSequence
+  }
+
+  private itemInHand(hand: 0 | 1) {
+    if (hand === 0) return this.bot.heldItem ?? null
+    if (this.bot.supportFeature('doesntHaveOffHandSlot')) return null
+    return this.bot.inventory.slots[45] ?? null
+  }
+
+  private handContext(hand: 0 | 1): HandContext {
+    const mainItem = this.itemInHand(0)
+    const offItem = this.itemInHand(1)
+    return {
+      bot: this.bot,
+      data: MinecraftData(this.bot.version),
+      version: this.versionCompare,
+      hand,
+      item: hand === 0 ? mainItem : offItem,
+      mainItem,
+      offItem,
+      sneaking: this.bot.getControlState('sneak'),
+      gameMode: this.bot.game.gameMode
+    }
+  }
+
+  /** gameMode.isDestroying(): survival mining in progress */
+  private isDestroying() {
+    return this.breakStartTime !== undefined && this.bot.game.gameMode !== 'creative'
+  }
+
+  /** LocalPlayer.swing for a right click result: the arm swing packet goes after the action packet, none from 26.3 */
+  private swingForUse(hand: 0 | 1, result: InteractionResult, kind: 'block' | 'item' | 'entity') {
+    if (result !== 'success') return
+    // up to 1.14 only a block's SUCCESS swings
+    if (kind !== 'block' && this.versionCompare['<']('1.15')) return
+    const arm = hand === 0 ? 'right' : 'left'
+    if (this.versionCompare['<']('26.3')) this.bot.swingArm(arm)
+    this.bot.emit('botArmSwingStart', arm)
+    this.bot.emit('botArmSwingEnd', arm)
+  }
+
+  startUseItem(cursor: Pick<CursorState, 'cursorBlock' | 'entity'>) {
+    if (this.isDestroying()) return
+    this.rightClickDelay = 0
+
+    const { cursorBlock, entity } = cursor
+
+    if (entity && !this.allowEntityUse(entity)) return
+
+    if (cursorBlock && this.runBlockInteractionHandler(cursorBlock)) return
+
+    const v = this.versionCompare
+    const hands: Array<0 | 1> = this.bot.supportFeature('doesntHaveOffHandSlot') ? [0] : [0, 1]
+    for (const hand of hands) {
+      const item = this.itemInHand(hand)
+      if (entity) {
+        const result = this.interactEntity(entity, hand)
+        if (consumesAction(result)) {
+          this.swingForUse(hand, result, 'entity')
+          return
+        }
+      } else if (cursorBlock) {
+        const result = this.useItemOn(cursorBlock, hand)
+        if (consumesAction(result)) {
+          this.swingForUse(hand, result, 'block')
+          return
+        }
+        // 1.8: an empty hand never goes on to use the item; 1.13+: FAIL ends the click (1.9 - 1.12 go on to use the item)
+        if (!item && hands.length === 1) return
+        if (result === 'fail' && v['>=']('1.13')) return
+      }
+      if (item) {
+        const result = this.useItem(hand)
+        if (consumesAction(result)) {
+          this.swingForUse(hand, result, 'item')
+          return
+        }
+      }
+    }
+  }
+
+  /** the plugin's own guards and mineflayer interact methods, which replace the vanilla click */
+  private allowEntityUse(entity: Entity) {
+    if (isVillagerForTrade(entity) && typeof this.bot.openVillager === 'function' && this.settings.useMineflayerInteractMethods !== false) {
+      void this.bot.openVillager!(entity).catch((err: unknown) => this.bot.emit('error', err instanceof Error ? err : new Error(String(err))))
+      return false
+    }
+    // Prevent activation of vehicles (minecarts/boats) to avoid getting stuck
+    if (this.settings.preventVehicleInteraction !== false && isProblematicVehicleEntity(entity)) {
+      // Skip activation with vehicles to prevent getting stuck inside them, which could cause server kick for flying
+      console.warn(`Prevented vehicle interaction with ${entity.name} to avoid getting stuck because of Mineflayer bug`)
+      return false
+    }
+    return true
+  }
+
+  /** true when a handler (or a mineflayer GUI method) took the click instead of the vanilla packets */
+  private runBlockInteractionHandler(cursorBlock: Block) {
+    if (shouldOpenBlockGuiInsteadOfPlacePackets(this.bot) && this.settings.useMineflayerInteractMethods !== false) {
+      const typeId = blockTypeId(cursorBlock)
+      if (matchAnvilBlockType(typeId) && typeof this.bot.openAnvil === 'function') {
+        void this.bot.openAnvil!(cursorBlock).catch((err: unknown) => this.bot.emit('error', err instanceof Error ? err : new Error(String(err))))
+        return true
+      }
+      if (matchEnchantmentTableBlockType(typeId) && typeof this.bot.openEnchantmentTable === 'function') {
+        void this.bot.openEnchantmentTable!(cursorBlock).catch((err: unknown) => this.bot.emit('error', err instanceof Error ? err : new Error(String(err))))
+        return true
+      }
     }
 
-    let dx = 0.5 + direction.x * 0.5
-    let dy = 0.5 + direction.y * 0.5
-    let dz = 0.5 + direction.z * 0.5
-
-    if (delta) {
-      dx = delta.x
-      dy = delta.y
-      dz = delta.z
+    if (this.bot.getControlState('sneak')) return false
+    for (const handler of Object.values(this.blockHandlers)) {
+      if (!handler.test(cursorBlock)) continue
+      try {
+        // a handler returning false lets the vanilla click go on
+        return handler.handle(cursorBlock, this.bot) !== false
+      } catch (err) {
+        this.bot.emit('error', err)
+      }
     }
-    if (forceLook !== 'ignore') {
-      await this.bot.lookAt(cursorBlock.position.offset(dx, dy, dz), forceLook === 'lookAtForce')
-    }
-    const pos = cursorBlock.position
+    return false
+  }
 
-    const Item = PrismarineItem(this.bot.version)
+  /** gameMode.interactAt then interact (one interact from 26.1): the packets are sent whatever the result */
+  private interactEntity(entity: Entity, hand: 0 | 1): InteractionResult {
+    const ctx = this.handContext(hand)
+    const predicted = predictEntityInteract(ctx, entity)
+    const spectator = this.bot.game.gameMode === 'spectator'
+    const location = getEntityHitLocation(this.bot, entity)
+    const sneaking = this.bot.getControlState('sneak')
+
+    if (this.bot.supportFeature('useEntityHasLocation')) {
+      // 26.1+: one ServerboundInteractPacket, interactAt is merged in
+      this.bot._client.write('use_entity', { target: entity.id, hand, location: { x: location.x, y: location.y, z: location.z }, sneaking })
+      if (spectator) return 'pass'
+      return consumesAction(predicted.interactAt) ? predicted.interactAt : predicted.interact
+    }
+
+    this.bot._client.write('use_entity', { target: entity.id, mouse: 2, x: location.x, y: location.y, z: location.z, hand, sneaking })
+    const atResult = spectator ? 'pass' : predicted.interactAt
+    if (consumesAction(atResult)) return atResult
+    this.bot._client.write('use_entity', { target: entity.id, mouse: 0, hand, sneaking })
+    if (spectator) return 'pass'
+    return predicted.interact
+  }
+
+  /** gameMode.useItemOn: block use, then the item's useOn; the packet goes whatever the result */
+  private useItemOn(cursorBlock: Block, hand: 0 | 1): InteractionResult {
+    const v = this.versionCompare
+    const ctx = this.handContext(hand)
+    const { item, mainItem, offItem } = ctx
+    const delta = cursorBlock['intersect'].minus(cursorBlock.position)
+    const faceNum: number = cursorBlock['face']
+    const direction = directionToVector[faceNum]!
+
+    let result: InteractionResult
+    if (this.bot.game.gameMode === 'spectator') {
+      result = v['>=']('1.21.2') ? 'consume' : 'success'
+    } else {
+      // Player.isSecondaryUseActive: sneaking with something in either hand skips the block
+      const suppressUsingBlock = ctx.sneaking && (!!mainItem || !!offItem)
+      result = suppressUsingBlock ? 'pass' : predictBlockUse(ctx, cursorBlock)
+      if (!consumesAction(result) && result !== 'fail') {
+        if (item) {
+          let predicted = false
+          result = predictItemUseOn(ctx, cursorBlock, () => {
+            if (hand !== 0) return true
+            predicted = botTryPlaceBlockPrediction(
+              this.bot,
+              cursorBlock,
+              faceNum,
+              delta,
+              this.settings.blockPlacePrediction ?? true,
+              this.settings.blockPlacePredictionDelay ?? 0,
+              this.settings.blockPlacePredictionHandler ?? null,
+              this.settings.blockPlacePredictionCheckEntities ?? true
+            )
+            return predicted
+          })
+          if (predicted) {
+            this.bot.emit('mouseBlockPlaced', cursorBlock, direction, delta, false, true)
+          }
+        } else {
+          result = 'pass'
+        }
+      }
+    }
+
+    this.writeUseItemOn(cursorBlock, direction, delta, hand)
+    return result
+  }
+
+  private writeUseItemOn(cursorBlock: Block, direction: Vec3, delta: Vec3, hand: 0 | 1) {
     const { bot } = this
-
+    const pos = cursorBlock.position
+    const dx = delta.x
+    const dy = delta.y
+    const dz = delta.z
     if (bot.supportFeature('blockPlaceHasHeldItem')) {
-      const packet = {
+      const Item = PrismarineItem(bot.version)
+      bot._client.write('block_place', {
         location: pos,
         direction: vectorToDirection(direction),
         heldItem: Item.toNotch(bot.heldItem),
         cursorX: Math.floor(dx * 16),
         cursorY: Math.floor(dy * 16),
         cursorZ: Math.floor(dz * 16)
-      }
-      bot._client.write('block_place', packet)
+      })
     } else if (bot.supportFeature('blockPlaceHasHandAndIntCursor')) {
       bot._client.write('block_place', {
         location: pos,
         direction: vectorToDirection(direction),
-        hand: handToPlaceWith,
+        hand,
         cursorX: Math.floor(dx * 16),
         cursorY: Math.floor(dy * 16),
         cursorZ: Math.floor(dz * 16)
@@ -452,113 +620,51 @@ export class MouseManager {
       bot._client.write('block_place', {
         location: pos,
         direction: vectorToDirection(direction),
-        hand: handToPlaceWith,
+        hand,
         cursorX: dx,
         cursorY: dy,
         cursorZ: dz
       })
-    } else if (bot.supportFeature('blockPlaceHasInsideBlock')) {
+    } else {
       bot._client.write('block_place', {
+        hand,
         location: pos,
         direction: vectorToDirection(direction),
-        hand: handToPlaceWith,
         cursorX: dx,
         cursorY: dy,
         cursorZ: dz,
         insideBlock: false,
-        sequence: 0, // 1.19.0
-        worldBorderHit: false // 1.21.3
+        worldBorderHit: false, // 1.21.2+
+        sequence: this.nextSequence() // 1.19+
       })
     }
-
-    if (!offhand) {
-      this.bot.swingArm(offhand ? 'left' : 'right')
-    }
-    if (doClientSwing) {
-      this.bot.emit('botArmSwingStart', offhand ? 'left' : 'right')
-      this.bot.emit('botArmSwingEnd', offhand ? 'left' : 'right')
-    }
   }
 
-  private updatePlaceInteract(cursorBlock: Block | null) {
-    if (cursorBlock && shouldOpenBlockGuiInsteadOfPlacePackets(this.bot) && this.settings.useMineflayerInteractMethods !== false) {
-      const typeId = blockTypeId(cursorBlock)
-      if (matchAnvilBlockType(typeId) && typeof this.bot.openAnvil === 'function') {
-        void this.bot.openAnvil!(cursorBlock).catch((err: unknown) => this.bot.emit('error', err instanceof Error ? err : new Error(String(err))))
-        this.rightClickDelay = 0
-        return
-      }
-      if (matchEnchantmentTableBlockType(typeId) && typeof this.bot.openEnchantmentTable === 'function') {
-        void this.bot.openEnchantmentTable!(cursorBlock).catch((err: unknown) => this.bot.emit('error', err instanceof Error ? err : new Error(String(err))))
-        this.rightClickDelay = 0
-        return
-      }
+  /** gameMode.useItem: no packet in spectator; otherwise use_item (mineflayer's activateItem), on cooldown too */
+  private useItem(hand: 0 | 1): InteractionResult {
+    if (this.bot.game.gameMode === 'spectator') return 'pass'
+    const ctx = this.handContext(hand)
+    const item = ctx.item!
+    const { result, startsUsing } = predictItemUse(ctx)
+    this.bot.activateItem(hand === 1)
+    ;(this.bot as any).usingHeldItem = startsUsing
+    if (startsUsing) {
+      this.itemBeingUsed = { item, isOffhand: hand === 1, name: item.name }
+      this.bot.emit('startUsingItem', item, hand === 1 ? 45 : this.bot.quickBarSlot, hand === 1, -1)
     }
-
-    // Check for special block handlers first
-    let handled = false
-    if (!this.bot.getControlState('sneak') && cursorBlock) {
-      for (const handler of Object.values(this.blockHandlers)) {
-        if (handler.test(cursorBlock)) {
-          try {
-            handler.handle(cursorBlock, this.bot)
-            handled = true
-            break
-          } catch (err) {
-            this.bot.emit('error', err)
-          }
-        }
-      }
-    }
-
-    const activateMain = this.bot.heldItem && isItemActivatable(this.bot.version, this.bot.heldItem)
-    const offHandItem = this.bot.inventory.slots[45]
-
-    if (!handled) {
-      let possiblyPlaceOffhand = () => {}
-      if (cursorBlock) {
-        const delta = cursorBlock['intersect'].minus(cursorBlock.position)
-        const faceNum: number = cursorBlock['face']
-        const direction = directionToVector[faceNum]!
-        // TODO support offhand prediction
-        const blockPlacementPredicted = botTryPlaceBlockPrediction(
-          this.bot,
-          cursorBlock,
-          faceNum,
-          delta,
-          this.settings.blockPlacePrediction ?? true,
-          this.settings.blockPlacePredictionDelay ?? 0,
-          this.settings.blockPlacePredictionHandler ?? null,
-          this.settings.blockPlacePredictionCheckEntities ?? true
-        )
-        if (blockPlacementPredicted) {
-          this.bot.emit('mouseBlockPlaced', cursorBlock, direction, delta, false, true)
-        }
-        // always emit block_place when looking at block
-        this.placeBlock(cursorBlock, direction, delta, false, undefined, !activateMain)
-        // Vanilla: offhand block_place only when block is not activatable, or when sneaking (item use takes priority)
-        const blockActivatable = isBlockActivatable(cursorBlock.name)
-        const shouldPlaceOffhand = !blockActivatable || this.bot.getControlState('sneak')
-        if (!this.bot.supportFeature('doesntHaveOffHandSlot') && shouldPlaceOffhand) {
-          possiblyPlaceOffhand = () => {
-            this.placeBlock(cursorBlock, direction, delta, true, undefined, false)
-          }
-        }
-      }
-
-      if (activateMain || !cursorBlock) {
-        const offhand = activateMain ? false : isItemActivatable(this.bot.version, offHandItem!)
-        const item = offhand ? offHandItem : this.bot.heldItem
-        if (item) {
-          this.startUsingItem(item, offhand)
-        }
-      }
-
-      possiblyPlaceOffhand()
-    }
-
-    this.rightClickDelay = 0
+    return result
   }
+
+  /** kept for API compatibility: sends one use_item_on for the hand, as vanilla's useItemOn does */
+  async placeBlock(cursorBlock: Block, direction: Vec3, delta: Vec3, offhand: boolean, forceLook: 'ignore' | 'lookAt' | 'lookAtForce' = 'ignore', doClientSwing = true) {
+    if (offhand && this.bot.supportFeature('doesntHaveOffHandSlot')) return
+    if (forceLook !== 'ignore') {
+      await this.bot.lookAt(cursorBlock.position.plus(delta), forceLook === 'lookAtForce')
+    }
+    this.writeUseItemOn(cursorBlock, direction, delta, offhand ? 1 : 0)
+    if (doClientSwing) this.swingForUse(offhand ? 1 : 0, 'success', 'block')
+  }
+
 
   getCustomBreakTime(block: Block) {
     if (this.customBreakTimeToolAllowance.size) {
@@ -579,18 +685,6 @@ export class MouseManager {
     return time
   }
 
-  private startUsingItem(item: { name: string }, isOffhand: boolean) {
-    if (this.itemBeingUsed) return // hands busy
-    if (isOffhand && this.bot.supportFeature('doesntHaveOffHandSlot')) return
-    const slot = isOffhand ? 45 : this.bot.quickBarSlot
-    this.bot.activateItem(isOffhand)
-    this.itemBeingUsed = {
-      item,
-      isOffhand,
-      name: item.name
-    }
-    this.bot.emit('startUsingItem', item, slot, isOffhand, -1)
-  }
 
   // TODO use it when item cant be used (define another map)
   // useItemOnce(item: { name: string }, isOffhand: boolean) {
@@ -667,11 +761,6 @@ export class MouseManager {
       ) {
         this.startBreaking(cursorBlockDiggable)
       }
-    } else if (performance.now() - this.lastSwing > 200) {
-      this.bot.swingArm('right')
-      this.bot.emit('botArmSwingStart', 'right')
-      this.bot.emit('botArmSwingEnd', 'right')
-      this.lastSwing = performance.now()
     }
   }
 

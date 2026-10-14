@@ -113,7 +113,8 @@ function createMockEntity(): Entity {
 
 // At the top of the file, before tests
 vi.mock('../src/entityRaycast', () => ({
-    raycastEntity: vi.fn().mockImplementation((bot) => null)
+    raycastEntity: vi.fn().mockImplementation((bot) => null),
+    getEntityHitLocation: vi.fn().mockImplementation(() => new Vec3(0, 0, 0))
 }))
 
 describe('MouseManager', () => {
@@ -131,9 +132,6 @@ describe('MouseManager', () => {
         mouse = inject(bot, {
             blockPlacePrediction: false,
         })
-        bot.mouse.activateEntity = () => {
-            testState.methodCalls.push('activateEntity')
-        }
     })
 
     // Add test utilities
@@ -424,7 +422,8 @@ describe('MouseManager', () => {
             SET_CURSOR_ENTITY()
 
             RIGHT_START()
-            ASSERT_ACTIONS(['activateEntity'], true)
+            // the mock bot has no off hand: one interaction
+            ASSERT_ACTIONS(['use_entity'], true)
 
             vi.advanceTimersByTime(500)
             UPDATE()

@@ -1,11 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import MinecraftData from 'minecraft-data'
 import { getLatestEntityName, isEntityAttackable } from '../src/attackableEntity'
-import { versionToNumber } from '../src/utils'
-
-// every release mineflayer supports (1.8.8+) that the minecraft-data in use knows
-export const supportedReleases = MinecraftData.supportedVersions.pc
-  .filter(v => /^\d+\.\d+(\.\d+)?$/.test(v) && versionToNumber(v) >= versionToNumber('1.8.8'))
+import { supportedReleases } from './harness/versions'
 
 // 1.8 - 1.10 register these abstract names, which a server never spawns
 const abstractNames = new Set(['Mob', 'Monster'])

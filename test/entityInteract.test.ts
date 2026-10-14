@@ -19,12 +19,13 @@ describe('right click on an entity', () => {
     expect(interact!.params).toMatchObject({ target: cow.id, mouse: 0, hand: 0 })
   })
 
-  it.each(versionsWith('26.1', '26.2', '26.3'))('%s: one interaction packet with the hit location', (version) => {
+  it.each(versionsWith('26.1', '26.2', '26.3'))('%s: one interaction packet per hand with the hit location', (version) => {
     const f = createFakeBot(version).inject().hold(null)
     const cow = f.lookAtEntity('cow')
     f.sneak().pressRight()
     const interactions = f.take(p => p.name === 'use_entity')
-    expect(interactions).toHaveLength(1)
+    // empty hands pass: the main hand, then the off hand
+    expect(interactions.map(p => p.params.hand)).toEqual([0, 1])
     expect(interactions[0]!.params).toMatchObject({ target: cow.id, hand: 0, sneaking: true })
     // a sneaking player's eyes are lower (1.27)
     expect(interactions[0]!.params.location.y).toBeCloseTo(f.bot.entity.position.y + 1.27 - cow.position.y)
