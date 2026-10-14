@@ -119,12 +119,16 @@ export class FakeBot {
     Object.defineProperty(bot, 'heldItem', { get: () => slots[36 + bot.quickBarSlot] ?? null, configurable: true })
     bot.blockAtCursor = () => fake.cursorBlock as any
     bot.canDigBlock = () => true
-    bot.digTime = () => 1000
+    // prismarine-block's dig time, as mineflayer's bot.digTime computes it (without enchantments and effects)
+    bot.digTime = (block: any) => block.digTime?.(bot.heldItem?.type ?? null, bot.game.gameMode === 'creative', false, !bot.entity.onGround, [], {}) ?? 1000
     bot.world = {
       getBlock: (pos: Vec3) => (fake.cursorBlock?.position.equals(pos) ? fake.cursorBlock : null),
       getBlockStateId: (pos: Vec3) => (fake.cursorBlock?.position.equals(pos) ? fake.cursorBlock.stateId : 0),
       setBlock: () => {},
-      setBlockStateId: () => {}
+      // a block broken (or placed) where the crosshair is: the crosshair then meets nothing
+      setBlockStateId: (pos: Vec3, stateId: number) => {
+        if (stateId === 0 && fake.cursorBlock?.position.equals(pos)) fake.cursorBlock = null
+      }
     } as any
     bot.lookAt = async () => {}
     bot.sleep = async () => {}
@@ -247,6 +251,19 @@ export class FakeBot {
     block.face = face
     block.intersect = position.plus(hit ?? faceHit[face])
     this.cursorBlock = block
+    return block as Block
+  }
+
+  /** a block by its state id (1.8 - 1.12: id << 4 | metadata) */
+  lookAtBlockState(stateId: number, { position = new Vec3(0, 63, 2), face = 1, hit }: CursorBlockOptions = {}) {
+    const block: any = (this.Block as any).fromStateId
+      ? (this.Block as any).fromStateId(stateId, 0)
+      : new (this.Block as any)(stateId >> 4, 0, stateId & 15)
+    block.position = position
+    block.face = face
+    block.intersect = position.plus(hit ?? faceHit[face])
+    this.cursorBlock = block
+    this.bot.entities = {} as any
     return block as Block
   }
 

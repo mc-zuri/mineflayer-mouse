@@ -9,6 +9,7 @@ import { getEntityHitLocation, raycastEntity } from './entityRaycast'
 import { BlockPlacePredictionOverride, botTryPlaceBlockPrediction, directionToVector } from './blockPlacePrediction'
 import { consumesAction, HandContext, InteractionResult, predictBlockUse, predictEntityInteract, predictItemUse, predictItemUseOn, VersionCompare } from './interactionRules'
 import MinecraftData from 'minecraft-data'
+import itemUseData from './itemUseData.json'
 
 export interface BlockInteractionHandler {
   test: (block: Block) => boolean
@@ -68,10 +69,6 @@ export interface CursorState {
   entity: Entity | null
 }
 
-// The delay is always 5 ticks between blocks
-// https://github.com/extremeheat/extracted_minecraft_data/blob/158aff8ad2a9051505e05703f554af8e50741d69/client/net/minecraft/client/multiplayer/MultiPlayerGameMode.java#L200
-const BLOCK_BREAK_DELAY_TICKS = 5
-
 /**
  * Checks if an entity is a vehicle (minecart or boat) that could cause the bot to get stuck
  * @param entity The entity to check
@@ -118,19 +115,6 @@ function isVillagerForTrade(entity: Entity): boolean {
   return n === 'villager' || n === 'zombie_villager'
 }
 
-/** True if feet or head are in water / bubble column (typical swimming case when `onGround` is false). */
-function isEntityInWater(bot: Bot): boolean {
-  return bot.entity?.['isInWater']
-}
-
-/** Whether vanilla-like mining may start: on ground, in water while airborne, or mid-air when setting allows. */
-function canStartBreakMining(bot: Bot, onGround: boolean, allowInAirMining: boolean | undefined): boolean {
-  if (onGround) return true
-  if (allowInAirMining === true) return true
-  if (isEntityInWater(bot) && !onGround) return true
-  return false
-}
-
 export class MouseManager {
   /** stateId - seconds */
   customBreakTime: Record<string, number> = {}
@@ -140,26 +124,38 @@ export class MouseManager {
   lastButtons = [false, false, false] as [boolean, boolean, boolean]
   cursorBlock: Block | null = null
   tick: number = 0
-  private entityRaycastCache: { tick: number, entity: Entity | null } | null = null
-  prevBreakState: number | null = null
-  currentDigTime: number | null = null
-  prevOnGround: boolean | null = null
-  rightClickDelay: number = 4
+  private entityRaycastCache: { key: string, entity: Entity | null } | null = null
+  /** Minecraft.rightClickDelay: ticks until a held right click is repeated */
+  rightClickDelay: number = 0
+  /** a click handled since the last tick belongs to the next tick, which then does not count its delay down */
+  private useClickedSinceTick = false
+  /** Minecraft.missTime: after a left click on nothing, holding the button does not mine for 10 ticks */
+  missTime = 0
+  /** Minecraft.startAttack returned true (the block broke at once): no continueAttack in that tick (1.19+) */
+  private instantAttack = false
+  /** set while a block is being mined (survival), for compatibility */
   breakStartTime: number | undefined = undefined
   ended = false
-  lastDugBlock: Vec3 | null = null
-  lastDugTime: number = 0
   /** a visually synced one */
   currentBreakBlock: { block: Block, stage: number } | null = null
+
+  // MultiPlayerGameMode's destroy state
+  private isDestroyingBlock = false
+  private destroyBlockPos: Vec3 | null = null
+  private destroyFace = 0
+  private destroyProgress = 0
+  private destroyDelay = 0
+  private destroyingItemKey = ''
+  private destroyedLocally = false
 
   debugDigStatus: string = 'none'
   debugLastStopReason: string = 'none'
   brokenBlocks: Block[] = []
-  lastSwing = 0
   itemBeingUsed: ItemUseState | null = null
+  /** ticks until the item in use completes (food, drinks), as LivingEntity.useItemRemaining */
+  private useItemRemaining = 0
 
   swingTimeout: any = null
-  // todo clear when got a packet from server
   private blockHandlers: Record<string, BlockInteractionHandler>
   originalDigTime: (block: Block) => number
 
@@ -178,65 +174,33 @@ export class MouseManager {
   resetDiggingVisual(block: Block) {
     this.bot.emit('blockBreakProgressStage', block, null)
     this.currentBreakBlock = null
-    this.prevBreakState = null
   }
 
+  /** stops mining the block (ABORT_DESTROY_BLOCK when mining), as MultiPlayerGameMode.stopDestroyBlock */
   stopDiggingCompletely(reason: string, tempStopping = false) {
-    // try { this.bot.stopDigging() } catch (err) { console.warn('stopDiggingCompletely', err) }
-    try { this.bot.stopDigging() } catch (err) { }
-    this.breakStartTime = undefined
-    if (this.currentBreakBlock) {
-      this.resetDiggingVisual(this.currentBreakBlock.block)
+    if (this.isDestroyingBlock) {
+      this.debugDigStatus = `stopped by ${reason}`
+      this.debugLastStopReason = reason
     }
-    this.debugDigStatus = `stopped by ${reason}`
-    this.debugLastStopReason = reason
-    this.currentDigTime = null
+    this.stopDestroyBlock()
     if (!tempStopping) {
       this.bot.emit('botArmSwingEnd', 'right')
     }
   }
 
   private initBotEvents() {
-    this.bot.on('physicsTick', () => {
-      this.tick++
-      if (this.rightClickDelay < 4) this.rightClickDelay++
-      this.update()
-    })
+    this.bot.on('physicsTick', () => this.onTick())
 
     this.bot.on('end', () => {
       this.ended = true
     })
 
-    this.bot.on('diggingCompleted', (block) => {
-      this.breakStartTime = undefined
-      this.lastDugBlock = block.position
-      this.lastDugTime = Date.now()
-      this.debugDigStatus = 'success'
-      this.brokenBlocks = [...this.brokenBlocks.slice(-5), block]
-      this.resetDiggingVisual(block)
-      // TODO: If the tool and enchantments immediately exceed the hardness times 30, the block breaks with no delay; SO WE NEED TO CHECK THAT
-      // TODO: Any blocks with a breaking time of 0.05
-    })
-
-    this.bot.on('diggingAborted', (block) => {
-      if (!this.cursorBlock?.position.equals(block.position)) return
-      this.debugDigStatus = 'aborted'
-      this.breakStartTime = undefined
-      if (this.buttons[0]) {
-        this.buttons[0] = false
-        this.update()
-        this.buttons[0] = true // trigger again
-      }
-      this.lastDugBlock = null
-      this.resetDiggingVisual(block)
-    })
-
+    // the server's swing of the bot (another source, or the server swinging for a use): only shown
     this.bot.on('entitySwingArm', (entity: Entity) => {
       if (this.bot.entity && entity.id === this.bot.entity.id) {
         if (this.swingTimeout) {
           clearTimeout(this.swingTimeout)
         }
-        this.bot.swingArm('right')
         this.bot.emit('botArmSwingStart', 'right')
         this.swingTimeout = setTimeout(() => {
           if (this.ended) return
@@ -246,48 +210,25 @@ export class MouseManager {
       }
     })
 
-    //@ts-ignore
-    this.bot.on('blockBreakProgressStageObserved', (block: Block, destroyStage: number, entity: Entity) => {
-      if (this.bot.entity && this.cursorBlock?.position.equals(block.position) && entity.id === this.bot.entity.id) {
-        if (!this.buttons[0]) {
-          this.buttons[0] = true
-          this.update()
-        }
-      }
-    })
-
-    //@ts-ignore
-    this.bot.on('blockBreakProgressStageEnd', (block: Block, entity: Entity) => {
-      if (this.bot.entity && this.currentBreakBlock?.block.position.equals(block.position) && entity.id === this.bot.entity.id) {
-        if (!this.buttons[0]) {
-          this.buttons[0] = false
-          this.update()
-        }
-      }
-    })
-
     this.bot._client.on('acknowledge_player_digging', (data: { location: { x: number, y: number, z: number }, block: number, status: number, successful: boolean } | { sequenceId: number }) => {
       if ('location' in data && !data.successful) {
         const packetPos = new Vec3(data.location.x, data.location.y, data.location.z)
-        if (this.cursorBlock?.position.equals(packetPos)) {
-          // restore the block to the world if already digged
-          if (this.bot.world.getBlockStateId(packetPos) === 0) {
-            const block = this.brokenBlocks.find(b => b.position.equals(packetPos))
-            if (block) {
-              this.bot.world.setBlock(packetPos, block)
-            } else {
-              debug(`Cannot find block to restore at ${packetPos}`)
-            }
+        // restore the block if it was broken locally (the server refused)
+        if (this.bot.world.getBlockStateId(packetPos) === 0) {
+          const block = this.brokenBlocks.find(b => b.position.equals(packetPos))
+          if (block) {
+            this.bot.world.setBlock(packetPos, block)
+          } else {
+            debug(`Cannot find block to restore at ${packetPos}`)
           }
-          this.buttons[0] = false
-          this.update()
         }
       }
     })
 
+    // LivingEntity.updatingUsingItem: another item in the hand stops using it, locally (the server sees the slot change)
     this.bot.on('heldItemChanged' as any, () => {
       if (this.itemBeingUsed && !this.itemBeingUsed.isOffhand) {
-        this.stopUsingItem()
+        this.finishUsingItem()
       }
     })
   }
@@ -299,65 +240,110 @@ export class MouseManager {
 
   beforeUpdateChecks() { }
 
+  /**
+   * The buttons changed (or the caller wants the cursor refreshed): clicks are handled at once, as the next tick's
+   * Minecraft.handleKeybinds would handle them.
+   */
   update() {
     this.beforeUpdateChecks()
     const cursor = this.getCursorState()
-    const { cursorBlock, cursorBlockDiggable, cursorChanged, cursorPositionChanged, entity } = cursor
     const leftPressed = this.buttons[0] && !this.lastButtons[0]
     const rightPressed = this.buttons[2] && !this.lastButtons[2]
 
-    // Minecraft.handleKeybinds: while using an item, releasing the use key releases it and clicks do nothing
+    // while using an item, releasing the use key releases it and clicks do nothing
     if (this.itemBeingUsed) {
       if (!this.buttons[2]) this.stopUsingItem()
     } else {
-      if (leftPressed) this.startAttack(cursor)
-      if (rightPressed) this.startUseItem(cursor)
-    }
-    // held right click repeats every 4 ticks
-    if (this.buttons[2] && !rightPressed && this.rightClickDelay >= 4 && !this.itemBeingUsed) {
-      this.startUseItem(cursor)
-    }
-
-    if (!entity) {
-      this.updateBreaking(cursorBlock, cursorBlockDiggable, cursorChanged, cursorPositionChanged)
+      if (leftPressed) this.instantAttack = this.startAttack(cursor) || this.instantAttack
+      if (rightPressed && !this.isDestroying()) {
+        this.startUseItem(cursor)
+        this.useClickedSinceTick = true
+      }
     }
 
     this.updateButtonStates()
   }
 
-  /** Minecraft.startAttack for an entity or a miss; a block is left to the breaking logic */
-  private startAttack({ entity, cursorBlock, cursorBlockDiggable }: CursorState) {
-    if (entity) {
-      this.bot.emit('botArmSwingStart', 'right')
-      this.bot.emit('botArmSwingEnd', 'right')
-      this.bot.attack(entity) // sends the attack, then the swing (1.8: swing first; 26.3: a punch)
-      return
+  /** Minecraft.tick: the right click delay, the held right click, continueAttack, the item in use */
+  private onTick() {
+    this.tick++
+    this.beforeUpdateChecks()
+    const cursor = this.getCursorState()
+    if (!this.useClickedSinceTick && this.rightClickDelay > 0) this.rightClickDelay--
+    this.useClickedSinceTick = false
+
+    if (this.itemBeingUsed && !this.buttons[2]) this.stopUsingItem()
+    if (this.buttons[2] && this.rightClickDelay === 0 && !this.itemBeingUsed) {
+      this.startUseItem(cursor)
     }
-    if (cursorBlock && cursorBlockDiggable) return
-    // a miss, or a block that cannot be broken here (adventure): one swing per click
-    this.bot.swingArm('right')
+    this.continueAttack(this.buttons[0] && !this.instantAttack, cursor)
+    this.instantAttack = false
+    if (this.missTime > 0) this.missTime--
+
+    // LivingEntity.updateUsingItem: food and drinks complete after their use duration
+    if (this.itemBeingUsed && --this.useItemRemaining === 0) {
+      this.finishUsingItem()
+    }
+    this.updateButtonStates()
+  }
+
+  /** LocalPlayer.swing for a left click: the swing packet (26.3: a punch) */
+  private swingAttack() {
+    if (this.versionCompare['>=']('26.3')) this.bot._client.write('punch', {})
+    else this.bot.swingArm('right')
     this.bot.emit('botArmSwingStart', 'right')
     this.bot.emit('botArmSwingEnd', 'right')
   }
 
+  /** Minecraft.startAttack: true when the block broke at once */
+  private startAttack({ entity, cursorBlock }: CursorState): boolean {
+    if (this.missTime > 0) return false
+    const v = this.versionCompare
+    const spectator = this.bot.game.gameMode === 'spectator'
+    // 26.1+: a spectator spectates instead of attacking, without a swing
+    if (spectator && v['>=']('26.1')) return false
+    if (entity) {
+      this.bot.emit('botArmSwingStart', 'right')
+      this.bot.emit('botArmSwingEnd', 'right')
+      // the attack packet, then the swing (1.8: the swing first; 26.3: a punch); 1.21.11+ spectators do not swing
+      ;(this.bot.attack as (entity: Entity, swing?: boolean) => void)(entity, !(spectator && v['>=']('1.21.11')))
+      return false
+    }
+    // 1.8 swings before anything else
+    if (v['<']('1.9')) this.swingAttack()
+    let instant = false
+    if (cursorBlock && cursorBlock.type !== 0 && cursorBlock.name !== 'air') {
+      this.destroyedLocally = false
+      this.startDestroyBlock(cursorBlock)
+      instant = this.destroyedLocally
+    } else if (this.bot.game.gameMode !== 'creative') {
+      this.missTime = 10
+    }
+    if (v['>=']('1.9') && !(spectator && v['>=']('1.21.11'))) this.swingAttack()
+    return instant
+  }
+
+  /** Minecraft.continueAttack: keeps mining the block under the crosshair, swinging each tick it does */
+  private continueAttack(down: boolean, { cursorBlock }: CursorState) {
+    if (!down) this.missTime = 0
+    if (this.missTime > 0 || this.itemBeingUsed) return
+    if (down && cursorBlock) {
+      if (cursorBlock.type !== 0 && cursorBlock.name !== 'air' && this.continueDestroyBlock(cursorBlock)) {
+        this.swingAttack()
+      }
+    } else {
+      this.stopDestroyBlock()
+    }
+  }
+
   getCursorState(): CursorState {
-    const inSpectator = this.bot.game.gameMode === 'spectator'
-    const inAdventure = this.bot.game.gameMode === 'adventure'
     const entity = this.getCachedRaycastEntity()
 
-    // If entity is found, we should stop any current digging
     let cursorBlock = this.bot.entity ? this.bot.blockAtCursor(5) : null
-    if (entity) {
-      cursorBlock = null
-      if (this.breakStartTime !== undefined) {
-        this.stopDiggingCompletely('entity interference')
-      }
-    }
+    if (entity) cursorBlock = null
 
-    let cursorBlockDiggable = cursorBlock
-    if (cursorBlock && (!this.bot.canDigBlock(cursorBlock) || inAdventure) && this.bot.game.gameMode !== 'creative') {
-      cursorBlockDiggable = null
-    }
+    // the block left click would start mining (Player.blockActionRestricted)
+    const cursorBlockDiggable = cursorBlock && !this.blockActionRestricted(cursorBlock) ? cursorBlock : null
 
     let cursorChanged = this.cursorBlock !== cursorBlock
     let cursorPositionChanged = false
@@ -380,14 +366,179 @@ export class MouseManager {
 
   private getCachedRaycastEntity(): Entity | null {
     if (!this.bot.entity) return null
-    if (this.entityRaycastCache?.tick === this.tick) {
+    // the same tick, look, position and entities: the same entity
+    const { yaw, pitch, position } = this.bot.entity
+    const key = `${this.tick}|${yaw}|${pitch}|${position}|${Object.keys(this.bot.entities ?? {}).join(',')}`
+    if (this.entityRaycastCache?.key === key) {
       return this.entityRaycastCache.entity
     }
     const entity = raycastEntity(this.bot)
-    this.entityRaycastCache = { tick: this.tick, entity }
+    this.entityRaycastCache = { key, entity }
     return entity
   }
 
+  // --- vanilla block breaking: MultiPlayerGameMode.startDestroyBlock / continueDestroyBlock / stopDestroyBlock ---
+
+  /** Player.blockActionRestricted: spectators never, adventure players only with an item that may break the block */
+  private blockActionRestricted(block: Block) {
+    const mode = this.bot.game.gameMode
+    if (mode === 'spectator') return true
+    if (mode !== 'adventure') return false
+    const canDestroy = (this.bot.heldItem as any)?.blocksCanDestroy as Array<[string]> | undefined
+    return !canDestroy?.some(([name]) => name === block.name || name === `minecraft:${block.name}`)
+  }
+
+  /** ServerboundPlayerActionPacket.Action ordinals; 26.3 put CHANGE_DESTROY_DIRECTION at 1 */
+  private digStatus(action: 'start' | 'abort' | 'stop' | 'changeDirection') {
+    const shifted = this.versionCompare['>=']('26.3')
+    switch (action) {
+      case 'start': return 0
+      case 'changeDirection': return 1
+      case 'abort': return shifted ? 2 : 1
+      case 'stop': return shifted ? 3 : 2
+    }
+  }
+
+  private writeDig(action: 'start' | 'abort' | 'stop' | 'changeDirection', position: Vec3, face: number) {
+    const predicted = action === 'start' || action === 'stop'
+    this.bot._client.write('block_dig', {
+      status: this.digStatus(action),
+      location: position,
+      face,
+      // 1.19+: START and STOP carry the prediction sequence, the others 0
+      sequence: predicted ? this.nextSequence() : 0
+    })
+  }
+
+  /** the item, as sameDestroyTarget compares it (another item restarts the mining) */
+  private heldItemKey() {
+    const item: any = this.bot.heldItem
+    if (!item) return ''
+    return `${item.name}:${item.metadata ?? 0}:${JSON.stringify(item.nbt ?? null)}`
+  }
+
+  /** BlockState.getDestroyProgress: the share of the block one tick of mining breaks */
+  private destroyProgressPerTick(block: Block) {
+    const time = this.digTime(block)
+    if (time === Infinity || Number.isNaN(time)) return 0
+    if (!time || time <= 0) return Infinity
+    return 50 / time
+  }
+
+  private isCreativeDestroy() {
+    return this.bot.game.gameMode === 'creative'
+  }
+
+  /** MultiPlayerGameMode.destroyBlock: the local prediction of the break */
+  private destroyBlockLocally(block: Block) {
+    const position = block.position
+    this.brokenBlocks = [...this.brokenBlocks.slice(-5), block]
+    this.destroyedLocally = true
+    this.debugDigStatus = 'success'
+    if (this.currentBreakBlock) this.resetDiggingVisual(this.currentBreakBlock.block)
+    if (!this.settings.noBreakPositiveUpdate) {
+      const updateBlockState = (this.bot as any)._updateBlockState
+      if (typeof updateBlockState === 'function') updateBlockState(position, 0)
+      else this.bot.world.setBlockStateId?.(position, 0)
+    }
+    this.bot.emit('diggingCompleted', block)
+  }
+
+  private startDestroyBlock(block: Block): boolean {
+    if (this.blockActionRestricted(block)) return false
+    const face: number = (block as any).face ?? 1
+    if (this.isCreativeDestroy()) {
+      this.writeDig('start', block.position, face)
+      this.destroyBlockLocally(block)
+      this.destroyDelay = 5
+      return true
+    }
+    if (this.isDestroyingBlock && this.sameDestroyTarget(block)) return true
+    if (this.isDestroyingBlock) {
+      // the old block is aborted with the new face
+      this.writeDig('abort', this.destroyBlockPos!, face)
+      if (this.currentBreakBlock) this.resetDiggingVisual(this.currentBreakBlock.block)
+    }
+    this.bot.emit('startDigging', block)
+    this.bot.emit('botArmSwingStart', 'right')
+    if (this.destroyProgressPerTick(block) >= 1) {
+      // an instant break: START only, never a STOP, no destroy delay
+      this.writeDig('start', block.position, face)
+      this.isDestroyingBlock = false
+      this.breakStartTime = undefined
+      this.destroyBlockLocally(block)
+    } else {
+      this.writeDig('start', block.position, face)
+      this.isDestroyingBlock = true
+      this.destroyBlockPos = block.position.clone()
+      this.destroyFace = face
+      this.destroyingItemKey = this.heldItemKey()
+      this.destroyProgress = 0
+      this.breakStartTime = performance.now()
+      this.debugDigStatus = 'breaking'
+      this.emitDestroyStage(block)
+    }
+    return true
+  }
+
+  private sameDestroyTarget(block: Block) {
+    return !!this.destroyBlockPos && block.position.equals(this.destroyBlockPos) && this.heldItemKey() === this.destroyingItemKey
+  }
+
+  private continueDestroyBlock(block: Block): boolean {
+    if (this.destroyDelay > 0) {
+      this.destroyDelay--
+      return true
+    }
+    if (this.isCreativeDestroy()) {
+      // creative breaks the block under the crosshair every 5 ticks while held
+      this.destroyDelay = 5
+      if (this.blockActionRestricted(block)) return true
+      this.writeDig('start', block.position, (block as any).face ?? 1)
+      this.destroyBlockLocally(block)
+      return true
+    }
+    if (this.isDestroyingBlock && this.sameDestroyTarget(block)) {
+      this.destroyProgress += this.destroyProgressPerTick(block)
+      const face: number = (block as any).face ?? 1
+      if (this.destroyProgress >= 1 - 1e-9) {
+        this.isDestroyingBlock = false
+        this.breakStartTime = undefined
+        this.writeDig('stop', block.position, face)
+        this.destroyBlockLocally(block)
+        this.destroyProgress = 0
+        this.destroyDelay = 5
+      } else {
+        // 26.3: the face changed while mining
+        if (this.versionCompare['>=']('26.3') && face !== this.destroyFace) {
+          this.destroyFace = face
+          this.writeDig('changeDirection', block.position, face)
+        }
+        this.emitDestroyStage(block)
+      }
+      return true
+    }
+    return this.startDestroyBlock(block)
+  }
+
+  private stopDestroyBlock() {
+    if (!this.isDestroyingBlock) return
+    this.writeDig('abort', this.destroyBlockPos!, 0)
+    this.isDestroyingBlock = false
+    this.destroyProgress = 0
+    this.breakStartTime = undefined
+    this.debugDigStatus = 'aborted'
+    if (this.currentBreakBlock) this.resetDiggingVisual(this.currentBreakBlock.block)
+  }
+
+  /** the crack stage shown on the block (MultiPlayerGameMode.getDestroyStage) */
+  private emitDestroyStage(block: Block) {
+    const stage = this.destroyProgress > 0 ? Math.min(Math.floor(this.destroyProgress * 10), 9) : 0
+    if (this.currentBreakBlock?.stage !== stage || !this.currentBreakBlock.block.position.equals(block.position)) {
+      this.bot.emit('blockBreakProgressStage', block, stage)
+    }
+    this.currentBreakBlock = { block, stage }
+  }
 
   // --- vanilla right click: Minecraft.startUseItem and MultiPlayerGameMode.useItemOn / useItem / interact ---
 
@@ -427,7 +578,7 @@ export class MouseManager {
 
   /** gameMode.isDestroying(): survival mining in progress */
   private isDestroying() {
-    return this.breakStartTime !== undefined && this.bot.game.gameMode !== 'creative'
+    return this.isDestroyingBlock
   }
 
   /** LocalPlayer.swing for a right click result: the arm swing packet goes after the action packet, none from 26.3 */
@@ -443,7 +594,7 @@ export class MouseManager {
 
   startUseItem(cursor: Pick<CursorState, 'cursorBlock' | 'entity'>) {
     if (this.isDestroying()) return
-    this.rightClickDelay = 0
+    this.rightClickDelay = 4
 
     const { cursorBlock, entity } = cursor
 
@@ -655,6 +806,9 @@ export class MouseManager {
     }
     if (startsUsing) {
       this.itemBeingUsed = { item, isOffhand: hand === 1, name: item.name }
+      const duration = (itemUseData.useDuration as Record<string, number>)[item.name] ?? 72000
+      // 0 (an ender eye): never completes
+      this.useItemRemaining = duration > 0 ? duration : Number.POSITIVE_INFINITY
       this.bot.emit('startUsingItem', item, hand === 1 ? 45 : this.bot.quickBarSlot, hand === 1, -1)
     }
     return result
@@ -695,78 +849,21 @@ export class MouseManager {
   // useItemOnce(item: { name: string }, isOffhand: boolean) {
   // }
 
+  /** MultiPlayerGameMode.releaseUsingItem: RELEASE_USE_ITEM (mineflayer's deactivateItem) */
   private stopUsingItem() {
-    if (this.itemBeingUsed) {
-      const { isOffhand, item } = this.itemBeingUsed
-      const slot = isOffhand ? 45 : this.bot.quickBarSlot
-      this.bot.emit('stopUsingItem', item, slot, isOffhand)
-      this.bot.deactivateItem()
-      this.itemBeingUsed = null
-    }
+    if (!this.itemBeingUsed) return
+    this.bot.deactivateItem()
+    this.finishUsingItem()
   }
 
-  private updateBreaking(cursorBlock: Block | null, cursorBlockDiggable: Block | null, cursorChanged: boolean, cursorPositionChanged: boolean) {
-    // Only stop when block position changed - stateId-only changes (server sync) can cause spurious stops and stuck state
-    if (cursorPositionChanged) {
-      this.stopDiggingCompletely('block change delay', !!cursorBlockDiggable)
-    }
-
-    // We stopped breaking
-    if (!this.buttons[0] && this.lastButtons[0]) {
-      this.stopDiggingCompletely('user stopped')
-    }
-
-    const hasCustomBreakTime = cursorBlockDiggable ? this.getCustomBreakTime(cursorBlockDiggable) !== undefined : false
-    const onGround = this.bot.entity?.onGround || this.bot.game.gameMode === 'creative' || hasCustomBreakTime
-    const canStartBreak = canStartBreakMining(this.bot, onGround, this.settings.allowInAirMining)
-    this.prevOnGround ??= onGround // todo this should be fixed in mineflayer to involve correct calculations when this changes as this is very important when mining straight down
-
-    this.updateBreakingBlockState(cursorBlockDiggable)
-
-    // Start break
-    if (this.buttons[0]) {
-      this.maybeStartBreaking(cursorBlock, cursorBlockDiggable, cursorChanged, cursorPositionChanged, canStartBreak, onGround)
-    }
-
-    this.prevOnGround = onGround
-  }
-
-  private updateBreakingBlockState(cursorBlockDiggable: Block | null) {
-    // Calculate and emit break progress
-    if (cursorBlockDiggable && this.breakStartTime !== undefined && this.bot.game.gameMode !== 'creative') {
-      const elapsed = performance.now() - this.breakStartTime
-      const time = this.digTime(cursorBlockDiggable)
-      if (time !== this.currentDigTime) {
-        console.warn('dig time changed! cancelling!', this.currentDigTime, '->', time)
-        this.stopDiggingCompletely('dig time changed')
-      } else {
-        const state = Math.floor((elapsed / time) * 10)
-        if (state !== this.prevBreakState) {
-          this.bot.emit('blockBreakProgressStage', cursorBlockDiggable, Math.min(state, 9))
-          this.currentBreakBlock = { block: cursorBlockDiggable, stage: state }
-        }
-        this.prevBreakState = state
-      }
-    }
-  }
-
-  private maybeStartBreaking(cursorBlock: Block | null, cursorBlockDiggable: Block | null, cursorChanged: boolean, cursorPositionChanged: boolean, canStartBreak: boolean, onGround: boolean) {
-    const justStartingNewBreak = !this.lastButtons[0]
-    // Allow resume when stopped and still on a diggable block (e.g. server restored block at same position)
-    const stoppedWithBlock = this.breakStartTime === undefined && !!cursorBlockDiggable
-    const blockChanged = cursorPositionChanged || (this.lastDugBlock && cursorBlock && !this.lastDugBlock.equals(cursorBlock.position)) || stoppedWithBlock
-    const diggingCompletedEnoughTimePassed = !this.lastDugTime || (Date.now() - this.lastDugTime > BLOCK_BREAK_DELAY_TICKS * 1000 / 20)
-    const hasCustomBreakTime = cursorBlockDiggable && this.getCustomBreakTime(cursorBlockDiggable) !== undefined
-    const breakStartConditionsChanged = onGround !== this.prevOnGround && !this.currentBreakBlock
-
-    if (cursorBlockDiggable) {
-      if (
-        canStartBreak
-        && (justStartingNewBreak || (diggingCompletedEnoughTimePassed && (blockChanged || breakStartConditionsChanged)))
-      ) {
-        this.startBreaking(cursorBlockDiggable)
-      }
-    }
+  /** the player is no longer using the item (released, completed, or another item in the hand) */
+  private finishUsingItem() {
+    if (!this.itemBeingUsed) return
+    const { isOffhand, item } = this.itemBeingUsed
+    const slot = isOffhand ? 45 : this.bot.quickBarSlot
+    this.itemBeingUsed = null
+    ;(this.bot as any).usingHeldItem = false
+    this.bot.emit('stopUsingItem', item, slot, isOffhand)
   }
 
   setConfigFromPacket(packet: any) {
@@ -795,37 +892,6 @@ export class MouseManager {
     if (packet.allowInAirMining !== undefined) {
       this.settings.allowInAirMining = packet.allowInAirMining
     }
-  }
-
-  private startBreaking(block: Block) {
-    // patch mineflayer
-    if (this.settings.noBreakPositiveUpdate && !this.bot['_updateBlockStateOld']) {
-      this.bot['_updateBlockStateOld'] = this.bot['_updateBlockState']
-      this.bot['_updateBlockState'] = () => {}
-    } else if (!this.settings.noBreakPositiveUpdate && this.bot['_updateBlockStateOld']) {
-      this.bot['_updateBlockState'] = this.bot['_updateBlockStateOld']
-      delete this.bot['_updateBlockStateOld']
-    }
-
-    this.lastDugBlock = null
-    this.debugDigStatus = 'breaking'
-    this.currentDigTime = this.digTime(block)
-    this.breakStartTime = performance.now()
-
-    // Reset break state when starting new break
-    this.prevBreakState = null
-
-    const vecArray = [new Vec3(0, -1, 0), new Vec3(0, 1, 0), new Vec3(0, 0, -1), new Vec3(0, 0, 1), new Vec3(-1, 0, 0), new Vec3(1, 0, 0)]
-    this.bot.dig(
-      //@ts-ignore
-      block, 'ignore', vecArray[block.face], block.face
-    ).catch((err) => {
-      if (err.message === 'Digging aborted') return
-      throw err
-    })
-
-    this.bot.emit('startDigging', block)
-    this.bot.emit('botArmSwingStart', 'right')
   }
 
   private updateButtonStates() {

@@ -98,12 +98,13 @@ describe.each(representativeVersions)('%s right click', (v) => {
     expect(click(f)).toEqual([useItem(v, 0), ...offHand])
   })
 
+  // a click belongs to the tick that follows it (vanilla handles clicks in Minecraft.tick): the repeat is 4 ticks later
   it('held right click placing blocks repeats every 4 ticks', () => {
     const f = bot().hold('stone')
     f.lookAtBlock('stone')
     f.pressRight()
     expect(f.takeCompact()).toEqual(['use_item_on(hand=0)', ...swing(v, 0)])
-    f.tick(3)
+    f.tick(4)
     expect(f.takeCompact()).toEqual([])
     f.tick(1)
     expect(f.takeCompact()).toEqual(['use_item_on(hand=0)', ...swing(v, 0)])
@@ -127,6 +128,8 @@ describe.each(representativeVersions)('%s right click', (v) => {
     f.pressRight()
     const first = f.takeCompact()
     f.tick(4)
+    expect(f.takeCompact()).toEqual([])
+    f.tick(1)
     expect(f.takeCompact()).toEqual(first)
     f.releaseRight()
   })

@@ -58,7 +58,7 @@ function useOnTag (e) {
   return [found[1] + shieldIntent, e.onFalse ?? 'pass']
 }
 
-const out = { use: {}, useOn: {}, alwaysEdible: {}, creativeCanAlwaysEat: {} }
+const out = { use: {}, useOn: {}, alwaysEdible: {}, creativeCanAlwaysEat: {}, useDuration: {} }
 const push = (map, name, v, value) => {
   const list = (map[name] ??= [])
   const last = list[list.length - 1]
@@ -77,6 +77,10 @@ for (const v of versions) {
   const data = resolve(v)
   for (const name of allUse) push(out.use, name, v, data.use[name] ? useTag(data.use[name]) : null)
   for (const name of allUseOn) push(out.useOn, name, v, data.useOn[name] ? useOnTag(data.useOn[name]) : null)
+  // ticks until the use completes (LivingEntity.useItemRemaining); 0: never (an ender eye)
+  for (const [name, d] of Object.entries(data.usingItems ?? {})) {
+    out.useDuration[name] = typeof d === 'number' ? d : /^eatTicks|consumeSeconds/.test(d) ? (name === 'dried_kelp' ? 16 : 32) : 72000
+  }
   out.alwaysEdible[v] = data.alwaysEdible
   out.creativeCanAlwaysEat[v] = data.creativeCanAlwaysEat
 }
