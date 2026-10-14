@@ -28,3 +28,4 @@ experiment-*
 .eslintcache
 Thumbs.db
 .idea/
+scripts/entities/entityPickable.detail.json
