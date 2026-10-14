@@ -31,7 +31,8 @@
     "devDependencies": {
         "@types/node": "^22.13.10",
         "@zardoy/tsconfig": "^1.5.1",
-        "minecraft-data": "^3.95.1",
+        "minecraft-data": "^3.117.0",
+        "minecraft-protocol": "1.68.0",
         "mineflayer": "^4.26.0",
         "prismarine-block": "^1.21.0",
         "prismarine-entity": "^2.5.0",
