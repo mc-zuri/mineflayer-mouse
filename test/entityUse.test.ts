@@ -34,6 +34,13 @@ describe.each(representativeVersions.filter(v => atLeast(v, '1.9')))('%s entity 
     expect(click(f)).toEqual([...interact(v, 0), ...(atLeast(v, '1.21.11') ? [] : entitySwing(v, 0))])
   })
 
+  it('a mob leashed to the bot is untied by any hand (mineflayer keeps the holder as its vehicle)', () => {
+    const f = bot().hold(null)
+    const cow = f.lookAtEntity('cow')
+    cow.vehicle = f.bot.entity
+    expect(click(f)).toEqual([...interact(v, 0), ...entitySwing(v, 0)])
+  })
+
   it('an armor stand takes the click with interact_at alone (before 26.1), without a swing', () => {
     const f = bot().hold(null)
     f.lookAtEntity('armor_stand')

@@ -149,6 +149,12 @@ function entityMeta(ctx: HandContext, entity: Entity, name: string): Record<stri
   const keys = ctx.data.entitiesByName[entity.name ?? '']?.metadataKeys
   const meta: Record<string, boolean> = {}
   if (Array.isArray((entity as any).passengers)) meta.vehicle = (entity as any).passengers.length > 0
+  // mineflayer keeps the leash holder (attach_entity, the leash packet from 1.9) as the entity's vehicle
+  const holder = (entity as any).vehicle
+  if (holder) {
+    meta.leashed = true
+    meta.leashedToPlayer = !!ctx.bot.entity && holder.id === ctx.bot.entity.id
+  }
   if (!keys) return meta
   const value = (key: string) => {
     const index = keys.indexOf(key)
