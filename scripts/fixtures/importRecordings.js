@@ -82,6 +82,16 @@ function importCase (file, version) {
   const fills = (rec.world?.fills ?? rec.sourceSession?.world?.fills ?? []).map(f => [...f.slice(0, 6), stateIdFor(data, Block, f[6])])
   const updates = new Map()
   const key = (p) => `${p.x},${p.y},${p.z}`
+  // the blocks the scenario's steps set (relative to its origin)
+  const origin = rec.origin ?? rec.world?.origin ?? [0, 0, 0]
+  for (const step of rec.steps ?? []) {
+    for (const action of step.actions ?? []) {
+      if (action.block?.at && action.block.state) {
+        const [x, y, z] = action.block.at
+        updates.set(key({ x: origin[0] + x, y: origin[1] + y, z: origin[2] + z }), stateIdFor(data, Block, action.block.state))
+      }
+    }
+  }
   // unknown (no fill covers it): stone stands in
   const stoneState = stateIdFor(data, Block, 'stone')
   const stateAt = (p) => {
@@ -117,6 +127,7 @@ function importCase (file, version) {
     if (lastLook && (look[0] !== lastLook[0] || look[1] !== lastLook[1])) target = null
     lastLook = look
     const packets = (tick.c ?? []).map(([, hex]) => decode(deserC, hex)).filter(p => CLICK_PACKETS.has(p.name))
+    let breaksNow = false
     // the target the packets name
     for (const p of packets) {
       const { name, params } = p
@@ -129,6 +140,8 @@ function importCase (file, version) {
       }
       if (name === 'block_dig' && params.status === 0) {
         target = { block: { stateId: stateAt(params.location), pos: [params.location.x, params.location.y, params.location.z], face: params.face } }
+        // creative breaks the block at once: the crosshair is on something else after this tick
+        if ((rec.gamemode ?? rec.start?.gameMode) === 'creative') breaksNow = true
         break
       }
       const entityId = name === 'attack' ? params.entityId : name === 'use_entity' ? params.target : undefined
@@ -148,6 +161,7 @@ function importCase (file, version) {
     const inScreen = (tick.c ?? []).some(([, hex]) => /^(window_click|close_window)$/.test(decode(deserC, hex).name))
     if (inScreen && !keys.length) packets.splice(0, packets.length, ...packets.filter(p => p.name !== 'arm_animation'))
     ticks.push({ t: tick.t, in: keys, look, target, food, packets: packets.map(p => [p.name, p.params]) })
+    if (breaksNow) target = null
     for (const [, hex] of tick.s ?? []) {
       const p = decode(deserS, hex)
       if (p.name === 'update_health') food = p.params.food
@@ -168,6 +182,8 @@ function importCase (file, version) {
       if (target?.block && p.name === 'block_change' && key(p.params.location) === key({ x: target.block.pos[0], y: target.block.pos[1], z: target.block.pos[2] })) {
         target = p.params.type === 0 ? null : { block: { ...target.block, stateId: p.params.type } }
       }
+      // a block placed elsewhere may now be in front of the crosshair: what it meets is not known until a packet names it
+      else if (target?.block && p.name === 'block_change' && p.params.type !== 0) target = null
     }
   }
 

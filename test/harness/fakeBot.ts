@@ -109,7 +109,8 @@ export class FakeBot {
       width: 0.6,
       metadata: []
     } as any
-    bot.entities = {} as any
+    // mineflayer keeps the bot among the entities
+    bot.entities = { [bot.entity.id]: bot.entity } as any
     bot.controlState = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false }
     bot.getControlState = (state) => bot.controlState[state]
     bot.setControlState = (state, value) => { bot.controlState[state] = value }
@@ -269,13 +270,13 @@ export class FakeBot {
     block.face = face
     block.intersect = position.plus(hit ?? faceHit[face])
     this.cursorBlock = block
-    this.bot.entities = {} as any
+    this.bot.entities = { [this.bot.entity.id]: this.bot.entity } as any
     return block as Block
   }
 
   lookAtNothing() {
     this.cursorBlock = null
-    this.bot.entities = {} as any
+    this.bot.entities = { [this.bot.entity.id]: this.bot.entity } as any
   }
 
   /** puts an entity right in front of the player, under the crosshair (the player looks along -z... yaw 0 looks to -z) */
@@ -295,7 +296,7 @@ export class FakeBot {
       metadata
     } as any
     this.cursorBlock = null
-    this.bot.entities = { [id]: entity } as any
+    this.bot.entities = { [this.bot.entity.id]: this.bot.entity, [id]: entity } as any
     return entity
   }
 
