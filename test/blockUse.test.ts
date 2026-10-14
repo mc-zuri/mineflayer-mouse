@@ -91,3 +91,11 @@ describe.each(representativeVersions.filter(v => atLeast(v, '1.9')))('%s block u
     expect(click(f)).toEqual(['use_item_on(hand=0)', ...swing(v, 0)])
   })
 })
+
+describe.each(representativeVersions.filter(v => atLeast(v, '1.11')))('%s block items on blocks that pass', (v) => {
+  it('a block held against an iron door is placed (the old hand-written list called every door interactive)', () => {
+    const f = createFakeBot(v).inject().hold('stone', 'torch')
+    f.lookAtBlock('iron_door')
+    expect(click(f)).toEqual(['use_item_on(hand=0)', ...swing(v, 0)])
+  })
+})

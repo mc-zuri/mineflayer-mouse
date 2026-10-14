@@ -8,6 +8,7 @@ import { debug } from './debug'
 import { getEntityHitLocation, raycastEntity } from './entityRaycast'
 import { getBlockReach } from './botCommon'
 import { BlockPlacePredictionOverride, botTryPlaceBlockPrediction, directionToVector } from './blockPlacePrediction'
+import { isBlockItem } from './itemInteractions'
 import { consumesAction, HandContext, InteractionResult, predictBlockUse, predictEntityInteract, predictItemUse, predictItemUseOn, VersionCompare } from './interactionRules'
 import MinecraftData from 'minecraft-data'
 import itemUseData from './itemUseData.json'
@@ -764,10 +765,10 @@ export class MouseManager {
       if (!consumesAction(result) && result !== 'fail') {
         // an item on cooldown is not used on the block
         if (item && !this.cooldowns.has(item.name)) {
-          let predicted = false
-          result = predictItemUseOn(ctx, cursorBlock, () => {
+          let predicted: boolean | undefined
+          const placementPossible = () => {
             if (hand !== 0) return true
-            predicted = botTryPlaceBlockPrediction(
+            predicted ??= botTryPlaceBlockPrediction(
               this.bot,
               cursorBlock,
               faceNum,
@@ -775,10 +776,16 @@ export class MouseManager {
               this.settings.blockPlacePrediction ?? true,
               this.settings.blockPlacePredictionDelay ?? 0,
               this.settings.blockPlacePredictionHandler ?? null,
-              this.settings.blockPlacePredictionCheckEntities ?? true
+              this.settings.blockPlacePredictionCheckEntities ?? true,
+              // the block itself passed already
+              true
             )
             return predicted
-          })
+          }
+          // 1.8 - 1.12: a block item that cannot be placed there fails before the packet (canPlaceBlockOnSide), and
+          // vanilla goes on to use the item
+          if (v['<']('1.13') && isBlockItem(ctx, item.name) && !placementPossible()) return 'fail'
+          result = predictItemUseOn(ctx, cursorBlock, placementPossible)
           if (predicted) {
             this.bot.emit('mouseBlockPlaced', cursorBlock, direction, delta, false, true)
           }

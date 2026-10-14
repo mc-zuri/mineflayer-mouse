@@ -11,13 +11,14 @@ const directionToFacing = ['south', 'west', 'north', 'east', 'up', 'down']
 
 export type BlockPlacePredictionOverride = (computedBlock: Block) => Block | null | undefined
 
-export const botTryPlaceBlockPrediction = (bot: Bot, cursorBlock: Block, faceNum: number, delta: Vec3, doWorldUpdate: boolean, doWorldUpdateDelay: number, override: BlockPlacePredictionOverride | null, checkEntities: boolean) => {
+/** skipInteractionCheck: the caller knows the block does not take the click (the mouse's own block rules) */
+export const botTryPlaceBlockPrediction = (bot: Bot, cursorBlock: Block, faceNum: number, delta: Vec3, doWorldUpdate: boolean, doWorldUpdateDelay: number, override: BlockPlacePredictionOverride | null, checkEntities: boolean, skipInteractionCheck = false) => {
     if (!bot.heldItem) return false
     const isSneaking = bot.controlState.sneak;
     const adventurePlaceAllowed = bot.heldItem.blocksCanPlaceOn?.some(([blockName]) => blockName === cursorBlock.name) ?? false
     const isBlockPlaceAction =
         bot.game.gameMode === 'adventure' ? adventurePlaceAllowed : (
-            isSneaking ||
+            isSneaking || skipInteractionCheck ||
             // not interact action
             activatableBlockWithoutItemPatterns.every(pattern => !pattern.test(cursorBlock.name))
         )
