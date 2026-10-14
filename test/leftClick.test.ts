@@ -204,3 +204,18 @@ describe.each(representativeVersions)('%s spectator and spear left click', (v) =
     expect(packets[0]!.params).toMatchObject({ status: atLeast(v, '26.3') ? 8 : 7, location: { x: 0, y: 0, z: 0 }, face: 0, sequence: 0 })
   })
 })
+
+describe.each(representativeVersions.filter(v => atLeast(v, '26.3')))('%s destroy direction', (v) => {
+  it('turning to another face of the block being mined sends CHANGE_DESTROY_DIRECTION', () => {
+    const f = createFakeBot(v).inject().hold('wooden_pickaxe')
+    f.lookAtBlock('dirt', { position: pos, face: 4 })
+    f.pressLeft().tick()
+    f.take()
+    f.lookAtBlock('dirt', { position: pos, face: 2 })
+    f.tick()
+    const [change, punch] = f.take()
+    expect(change!.name).toBe('block_dig')
+    expect(change!.params).toMatchObject({ status: 1, location: pos, face: 2, sequence: 0 })
+    expect(punch!.name).toBe('punch')
+  })
+})
