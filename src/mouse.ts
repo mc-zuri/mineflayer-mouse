@@ -9,6 +9,7 @@ import { getEntityHitLocation, raycastEntity } from './entityRaycast'
 import { getBlockReach, getBotEyeHeight, getEntityReach } from './botCommon'
 import { getLatestEntityName } from './attackableEntity'
 import { WorldBorderTracker } from './worldBorder'
+import { PickBlock } from './pickBlock'
 import { AttackRange, getAttackRange, getMinimumAttackCharge, isInAttackRange, getAttackSpeed } from './attackGates'
 import { BlockPlacePredictionOverride, botTryPlaceBlockPrediction, directionToVector } from './blockPlacePrediction'
 import { isBlockItem } from './itemInteractions'
@@ -167,6 +168,9 @@ export class MouseManager {
   /** Player.attackStrengthTicker: ticks since the last attack (1.21.11+ gates attacks by it) */
   attackStrengthTicker = 0
   private lastMainHandName: string | undefined
+  /** Ctrl held: a pick block asks for the block's data (1.21.4+ includeData) */
+  ctrlDown = false
+  private picker!: PickBlock
   /** the world border, from the server's packets */
   worldBorder!: WorldBorderTracker
   /** ItemCooldowns: item (cooldown group) name -> ticks left */
@@ -182,6 +186,7 @@ export class MouseManager {
       ...(settings.blockInteractionHandlers ?? {})
     }
     this.worldBorder = new WorldBorderTracker(bot, () => this.versionCompare)
+    this.picker = new PickBlock(bot, () => this.versionCompare)
     this.initBotEvents()
 
     // patch mineflayer
@@ -259,6 +264,16 @@ export class MouseManager {
     })
   }
 
+  /**
+   * A middle click (Minecraft.pickBlock): the block or entity under the crosshair. includeData: ask for its data, as
+   * Ctrl does (1.21.4+; in creative before)
+   */
+  pickBlock(includeData = this.ctrlDown) {
+    if (this.itemBeingUsed) return
+    const cursor = this.getCursorState()
+    this.picker.pick({ block: cursor.cursorBlock, entity: cursor.entity }, includeData)
+  }
+
   /** a right click on the entity, as startUseItem does it */
   activateEntity(entity: Entity) {
     this.startUseItem({ cursorBlock: null, entity })
@@ -281,6 +296,7 @@ export class MouseManager {
   private handleClicks(cursor: CursorState) {
     let usedRightClick = false
     const leftPressed = this.buttons[0] && !this.lastButtons[0]
+    const middlePressed = this.buttons[1] && !this.lastButtons[1]
     const rightPressed = this.buttons[2] && !this.lastButtons[2]
 
     // while using an item, releasing the use key releases it and clicks do nothing
@@ -292,6 +308,7 @@ export class MouseManager {
         this.startUseItem(cursor)
         usedRightClick = true
       }
+      if (middlePressed) this.picker.pick({ block: cursor.cursorBlock, entity: cursor.entity }, this.ctrlDown)
     }
     return usedRightClick
   }
@@ -299,6 +316,8 @@ export class MouseManager {
   /** Minecraft.tick: the right click delay, the held right click, continueAttack, the item in use */
   private onTick() {
     this.tick++
+    // MultiPlayerGameMode.tick: a hotbar slot a pick block selected goes out
+    this.picker.tick()
     this.beforeUpdateChecks()
     const cursor = this.getCursorState()
     if (!this.useClickedSinceTick && this.rightClickDelay > 0) this.rightClickDelay--
@@ -1131,6 +1150,18 @@ export function inject(bot: Bot, settings: BotPluginSettings) {
     bot.rightClickStart()
     bot.rightClickEnd()
   }
+  bot.middleClickStart = () => {
+    mouse.buttons[1] = true
+    mouse.update()
+  }
+  bot.middleClickEnd = () => {
+    mouse.buttons[1] = false
+    mouse.update()
+  }
+  bot.middleClick = () => {
+    bot.middleClickStart()
+    bot.middleClickEnd()
+  }
   Object.defineProperty(bot, 'usingItem', {
     get: () => mouse.itemBeingUsed
   })
@@ -1148,6 +1179,10 @@ declare module 'mineflayer' {
     leftClickEnd: () => void
     leftClick: () => void
     rightClick: () => void
+    /** the middle button: pick block */
+    middleClickStart: () => void
+    middleClickEnd: () => void
+    middleClick: () => void
     readonly usingItem: ItemUseState | null
   }
 

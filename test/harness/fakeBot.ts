@@ -115,6 +115,11 @@ export class FakeBot {
     bot.getControlState = (state) => bot.controlState[state]
     bot.setControlState = (state, value) => { bot.controlState[state] = value }
     bot.quickBarSlot = 0
+    // mineflayer's setQuickBarSlot sends held_item_slot
+    bot.setQuickBarSlot = (slot: number) => {
+      bot.quickBarSlot = slot
+      fake.write('held_item_slot', { slotId: slot })
+    }
     const slots: (Item | null)[] = new Array(46).fill(null)
     bot.inventory = { slots } as any
     Object.defineProperty(bot, 'heldItem', { get: () => slots[36 + bot.quickBarSlot] ?? null, configurable: true })
@@ -317,6 +322,7 @@ export class FakeBot {
   }
 
   pressRight() { this.bot.rightClickStart(); return this }
+  middleClick() { this.bot.middleClick(); return this }
   releaseRight() { this.bot.rightClickEnd(); return this }
   pressLeft() { this.bot.leftClickStart(); return this }
   releaseLeft() { this.bot.leftClickEnd(); return this }
