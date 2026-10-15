@@ -26,7 +26,12 @@ if (!inputDir) {
 }
 const outDir = path.join(__dirname, '../../test/fixtures/recordings')
 
-const CLICK_PACKETS = new Set(['block_place', 'use_item', 'arm_animation', 'use_entity', 'attack', 'punch', 'block_dig', 'held_item_slot', 'spectate', 'spectator_action'])
+const CLICK_PACKETS = new Set(['block_place', 'use_item', 'arm_animation', 'use_entity', 'attack', 'punch', 'block_dig', 'held_item_slot', 'spectate', 'spectator_action',
+  'pick_item', 'pick_item_from_block', 'pick_item_from_entity', 'set_creative_slot', 'custom_payload'])
+// the server packets a replay feeds back: the world border, riding, the selected slot
+const SERVER_STATE_PACKETS = new Set(['world_border', 'initialize_world_border', 'world_border_center', 'world_border_size', 'world_border_lerp_size', 'set_passengers', 'held_item_slot'])
+// the input keys a replay presses: the buttons, sneaking, the movement keys (paddling) and the middle button (pick)
+const INPUT_KEYS = ['use', 'attack', 'sneak', 'forward', 'back', 'left', 'right', 'pickItem']
 
 const round = (n) => (typeof n === 'number' && !Number.isInteger(n) ? Math.round(n * 1e6) / 1e6 : n)
 function clean (v) {
@@ -156,15 +161,17 @@ function importCase (file, version) {
       // the block went away (broken): nothing known under the crosshair
       if (stateAt({ x, y, z }) === 0 && !packets.some(p => p.name === 'block_dig' && p.params.status === 0)) target = null
     }
-    const keys = ['use', 'attack', 'sneak'].filter(k => inp[k])
+    const keys = INPUT_KEYS.filter(k => inp[k] || (k === 'pickItem' && (inp.pick || inp.pickBlock || inp.middle)))
     // a swing from an inventory screen action (dropping an item) is not a click
     const inScreen = (tick.c ?? []).some(([, hex]) => /^(window_click|close_window)$/.test(decode(deserC, hex).name))
     if (inScreen && !keys.length) packets.splice(0, packets.length, ...packets.filter(p => p.name !== 'arm_animation'))
-    ticks.push({ t: tick.t, in: keys, look, target, food, packets: packets.map(p => [p.name, p.params]) })
+    const server = (tick.s ?? []).map(([, hex]) => decode(deserS, hex)).filter(p => SERVER_STATE_PACKETS.has(p.name) && (p.name !== 'custom_payload'))
+    ticks.push({ t: tick.t, in: keys, look, target, food, server: server.map(p => [p.name, p.params]), packets: packets.map(p => [p.name, p.params]).filter(([name, params]) => name !== 'custom_payload' || params.channel === 'MC|PickItem') })
     if (breaksNow) target = null
     for (const [, hex] of tick.s ?? []) {
       const p = decode(deserS, hex)
       if (p.name === 'update_health') food = p.params.food
+      if (p.name === 'set_passengers' && !entities[p.params.entityId]) entities[p.params.entityId] = summons.find(s => /boat|raft/.test(s.entity))?.entity ?? 'oak_boat'
       if (p.name === 'block_change') updates.set(key(p.params.location), p.params.type)
       if (p.name === 'multi_block_change' && Array.isArray(p.params.records)) {
         // modern: records as varlongs (state << 12 | x << 8 | z << 4 | y), relative to the chunk section
@@ -202,6 +209,8 @@ function importCase (file, version) {
   let last = ticks.length - 1
   while (last > first && !active(ticks[last])) last--
   const kept = first < 0 ? [] : ticks.slice(first, last + 1)
+  // the server state set before the first click (a world border, a ride) comes with the first kept tick
+  if (kept.length) kept[0] = { ...kept[0], server: [...ticks.slice(0, first).flatMap(t => t.server ?? []), ...(kept[0].server ?? [])] }
 
   return {
     name: rec.name,
@@ -210,16 +219,18 @@ function importCase (file, version) {
     gamemode: rec.gamemode ?? rec.start?.gameMode ?? 'survival',
     // the player's feet, where the blocks are measured from
     position: rec.start?.pos ?? rec.at ?? null,
+    playerEntityId: rec.start?.netState?.entityId ?? null,
     // the recordings keep no health packets: a scenario that gives the hunger effect leaves the player hungry
     food: rec.setup?.food ?? (JSON.stringify(rec.steps ?? []).includes('minecraft:hunger') ? 19 : undefined),
     selected: rec.setup?.selected ?? 0,
     inventory,
     entities,
     // ticks with no input and no click packet are left out; t keeps the tick count
-    ticks: kept.filter(t => t.in.length || t.packets.length).map(t => {
+    ticks: kept.filter(t => t.in.length || t.packets.length || t.server?.length).map(t => {
       const o = { t: t.t, in: t.in }
       if (t.target) o.target = t.target
       if (t.food !== undefined) o.food = t.food
+      if (t.server?.length) o.server = t.server
       if (t.packets.length) o.packets = t.packets
       return o
     })

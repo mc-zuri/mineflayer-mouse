@@ -15,6 +15,8 @@ interface FixtureTick {
   in: string[]
   target?: { block?: { stateId: number, pos: [number, number, number], face: number, hit?: [number, number, number] }, entity?: number }
   packets?: Array<[string, any]>
+  /** the server's state packets of the tick (world border, riding, selected slot) */
+  server?: Array<[string, any]>
   /** the food level the server last sent */
   food?: number
 }
@@ -23,6 +25,8 @@ interface Fixture {
   version: string
   gamemode: string
   position?: [number, number, number] | null
+  /** the player's entity id in the recording */
+  playerEntityId?: number
   food?: number
   selected: number
   inventory: Record<string, [string, number]>
@@ -63,6 +67,23 @@ export function describePacket(name: string, p: any): string {
   }
 }
 
+/** the server's packets a replay feeds back to the bot, as mineflayer would apply them */
+function applyServerPacket(f: ReturnType<typeof createFakeBot>, fixture: Fixture, name: string, params: any) {
+  if (name === 'set_passengers') {
+    const playerId = fixture.playerEntityId
+    const vehicle: any = { id: params.entityId, name: fixture.entities[params.entityId] ?? 'oak_boat', passengers: [] }
+    vehicle.passengers = (params.passengers ?? []).map((id: number) => (id === playerId ? f.bot.entity : { id }))
+    if (vehicle.passengers.includes(f.bot.entity)) (f.bot.entity as any).vehicle = vehicle
+    else if ((f.bot.entity as any).vehicle?.id === params.entityId) delete (f.bot.entity as any).vehicle
+    return
+  }
+  if (name === 'held_item_slot') {
+    f.bot.quickBarSlot = params.slot ?? params.slotId ?? f.bot.quickBarSlot
+    return
+  }
+  f.bot._client.emit(name, params)
+}
+
 const IGNORED = new Set(['held_item_slot', 'position_look', 'position', 'look', 'flying'])
 
 function replay(version: string, fixture: Fixture) {
@@ -88,7 +109,7 @@ function replay(version: string, fixture: Fixture) {
   const byTick = new Map(fixture.ticks.map(t => [t.t, t]))
   const first = fixture.ticks[0]!.t
   const last = fixture.ticks[fixture.ticks.length - 1]!.t
-  const held = { use: false, attack: false }
+  const held = { use: false, attack: false, pickItem: false }
   for (let t = first; t <= last; t++) {
     const tick = byTick.get(t)
     const input = tick?.in ?? []
@@ -108,18 +129,22 @@ function replay(version: string, fixture: Fixture) {
       f.lookAtNothing()
     }
     f.sneak(input.includes('sneak'))
+    for (const key of ['forward', 'back', 'left', 'right'] as const) f.bot.setControlState(key, input.includes(key))
     if (tick?.food !== undefined) f.bot.food = tick.food
     // the clicks since the last tick, then the tick (they belong to it, as to vanilla's handleKeybinds)
-    for (const button of ['attack', 'use'] as const) {
+    for (const button of ['attack', 'use', 'pickItem'] as const) {
       const down = input.includes(button)
       if (down !== held[button]) {
         held[button] = down
         if (button === 'use') down ? f.pressRight() : f.releaseRight()
-        else down ? f.pressLeft() : f.releaseLeft()
+        else if (button === 'attack') down ? f.pressLeft() : f.releaseLeft()
+        else down ? f.bot.middleClickStart() : f.bot.middleClickEnd()
       }
     }
     vi.advanceTimersByTime(50)
     f.tick()
+    // the server's state packets of the tick: the world border, riding, the selected slot
+    for (const [name, params] of tick?.server ?? []) applyServerPacket(f, fixture, name, params)
 
     const actual = f.take().filter(p => !IGNORED.has(p.name))
     // the server's side of a lead: the first interaction attaches the mob to the player, the next unties it
