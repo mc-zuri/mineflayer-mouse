@@ -6,9 +6,73 @@ import { getBotEyeHeight, getBlockReach, getEntityReach } from './botCommon'
 import { Shape } from 'prismarine-world/types/iterators'
 import { isEntityAttackable } from './attackableEntity'
 import MinecraftData from 'minecraft-data'
+import { AttackRange, effectiveRange } from './attackGates'
 
-export function raycastEntity(bot: Bot, maxDistance?: number) {
+/**
+ * The entity under the crosshair (GameRenderer.pick). With an item that has an attack range (1.21.11+, a spear),
+ * LocalPlayer.raycastHitResult looks for entities between the range's ends first, their boxes widened by its margin;
+ * a block nearer than the range's start wins; with no entity there, the ordinary pick follows.
+ */
+export function raycastEntity(bot: Bot, maxDistance?: number, attackRange?: AttackRange): Entity | null {
     if (!bot.entity) return null
+    if (attackRange && maxDistance === undefined) {
+        const { min, max } = effectiveRange(attackRange, bot.game.gameMode)
+        const eye = bot.entity.position.offset(0, getBotEyeHeight(bot), 0)
+        const block = bot.blockAtCursor(getBlockReach(bot))
+        const blockDistance = block?.['intersect'] ? block['intersect'].distanceTo(eye) : Infinity
+        if (blockDistance < min) return null
+        const found = nearestEntityOnRay(bot, min, max, attackRange.hitboxMargin)
+        if (found) return found
+    }
+    return ordinaryPick(bot, maxDistance)
+}
+
+function lookDirection(bot: Bot) {
+    return new Vec3(-Math.sin(bot.entity.yaw) * Math.cos(bot.entity.pitch), Math.sin(bot.entity.pitch), -Math.cos(bot.entity.yaw) * Math.cos(bot.entity.pitch)).normalize()
+}
+
+/** the nearest pickable entity whose box (widened by margin) the ray meets between from and to blocks from the eyes */
+function nearestEntityOnRay(bot: Bot, from: number, to: number, margin: number): Entity | null {
+    const minecraftData = MinecraftData(bot.version)
+    const eye = bot.entity.position.offset(0, getBotEyeHeight(bot), 0)
+    const dir = lookDirection(bot)
+    let best: Entity | null = null
+    let bestT = Infinity
+    for (const entity of Object.values(bot.entities)) {
+        if (entity === bot.entity || !entity.position) continue
+        const { width, height } = getEntitySize(minecraftData, entity)
+        if (!width || !height) continue
+        const w = width / 2 + margin
+        const box = [entity.position.x - w, entity.position.y - margin, entity.position.z - w, entity.position.x + w, entity.position.y + height + margin, entity.position.z + w]
+        const t = rayBoxEntry([eye.x, eye.y, eye.z], [dir.x, dir.y, dir.z], box, from, to)
+        if (t !== null && t < bestT && isEntityAttackable(minecraftData, entity)) {
+            best = entity
+            bestT = t
+        }
+    }
+    return best
+}
+
+/** where the ray (limited to [from, to]) enters the box, or null */
+function rayBoxEntry(start: number[], d: number[], box: number[], from: number, to: number): number | null {
+    let tNear = from
+    let tFar = to
+    for (let axis = 0; axis < 3; axis++) {
+        if (Math.abs(d[axis]!) < 1e-12) {
+            if (start[axis]! < box[axis]! || start[axis]! > box[axis + 3]!) return null
+            continue
+        }
+        let t1 = (box[axis]! - start[axis]!) / d[axis]!
+        let t2 = (box[axis + 3]! - start[axis]!) / d[axis]!
+        if (t1 > t2) [t1, t2] = [t2, t1]
+        tNear = Math.max(tNear, t1)
+        tFar = Math.min(tFar, t2)
+        if (tNear > tFar) return null
+    }
+    return tNear
+}
+
+function ordinaryPick(bot: Bot, maxDistance?: number): Entity | null {
 
     const minecraftData = MinecraftData(bot.version)
 

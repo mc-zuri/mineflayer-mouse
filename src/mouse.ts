@@ -9,6 +9,7 @@ import { getEntityHitLocation, raycastEntity } from './entityRaycast'
 import { getBlockReach } from './botCommon'
 import { getLatestEntityName } from './attackableEntity'
 import { WorldBorderTracker } from './worldBorder'
+import { AttackRange, getAttackRange, getMinimumAttackCharge, isInAttackRange, getAttackSpeed } from './attackGates'
 import { BlockPlacePredictionOverride, botTryPlaceBlockPrediction, directionToVector } from './blockPlacePrediction'
 import { isBlockItem } from './itemInteractions'
 import { consumesAction, HandContext, InteractionResult, predictBlockUse, predictEntityInteract, predictItemUse, predictItemUseOn, VersionCompare } from './interactionRules'
@@ -163,6 +164,9 @@ export class MouseManager {
    * driver) keeps clicks from attacking or using. Set at the end of each tick, as rideTick sets it after the clicks.
    */
   handsBusy = false
+  /** Player.attackStrengthTicker: ticks since the last attack (1.21.11+ gates attacks by it) */
+  attackStrengthTicker = 0
+  private lastMainHandName: string | undefined
   /** the world border, from the server's packets */
   worldBorder!: WorldBorderTracker
   /** ItemCooldowns: item (cooldown group) name -> ticks left */
@@ -320,6 +324,13 @@ export class MouseManager {
     }
     this.handsBusy = this.computeHandsBusy()
     this.worldBorder.tick()
+    // Player.tick: the attack strength grows, and resets when the main hand changes to another item
+    this.attackStrengthTicker++
+    const mainHandName = this.bot.heldItem?.name
+    if (mainHandName !== this.lastMainHandName) {
+      if (this.lastMainHandName !== undefined) this.attackStrengthTicker = 0
+      this.lastMainHandName = mainHandName
+    }
     this.updateButtonStates()
   }
 
@@ -334,6 +345,21 @@ export class MouseManager {
     if (this.versionCompare['>=']('1.19.4') && Array.isArray(vehicle.passengers) && vehicle.passengers.length && vehicle.passengers[0] !== this.bot.entity) return false
     const c = this.bot.controlState
     return !!(c.forward || c.back || c.left || c.right)
+  }
+
+  /** Player.cannotAttackWithItem (1.21.11+): the ticks since the last attack over the attack delay, below the item's minimum charge */
+  private cannotAttackWithItem() {
+    if (this.versionCompare['<']('1.21.11')) return false
+    const required = getMinimumAttackCharge(this.bot.heldItem)
+    if (!(required > 0)) return false
+    const delay = Math.fround(1 / getAttackSpeed(this.bot) * 20)
+    return Math.fround(this.attackStrengthTicker / delay) < required
+  }
+
+  /** the ATTACK_RANGE of the item in use, else of the main hand (1.21.11+) */
+  attackRange(): AttackRange | undefined {
+    if (this.versionCompare['<']('1.21.11')) return undefined
+    return getAttackRange((this.itemBeingUsed?.item as any) ?? this.bot.heldItem)
   }
 
   /** 1.21.11+: the main hand holds an item with the piercing_weapon component (the spears) */
@@ -365,8 +391,11 @@ export class MouseManager {
       else if (entity) this.bot._client.write('spectate_entity', { entityId: entity.id })
       return true
     }
+    // 1.21.11+: Player.cannotAttackWithItem: an item with a minimum attack charge not charged yet does nothing
+    if (this.cannotAttackWithItem()) return false
     // 1.21.11+: a spear (PIERCING_WEAPON) stabs instead of attacking or mining
     if (!spectator && this.holdsPiercingWeapon()) {
+      this.attackStrengthTicker = 0
       // ServerboundPlayerActionPacket.Action.STAB (26.3 inserted CHANGE_DESTROY_DIRECTION before it), at the origin
       this.bot._client.write('block_dig', { status: v['>=']('26.3') ? 8 : 7, location: new Vec3(0, 0, 0), face: 0, sequence: 0 })
       // the swing packet; 26.3 swings locally without a punch
@@ -378,8 +407,16 @@ export class MouseManager {
     if (entity) {
       this.bot.emit('botArmSwingStart', 'right')
       this.bot.emit('botArmSwingEnd', 'right')
+      const swing = !(spectator && v['>=']('1.21.11'))
+      // 1.21.11+: an item with an attack range attacks only within it; out of it the click just swings
+      const range = this.attackRange()
+      if (range && !isInAttackRange(range, this.bot, getEntityHitLocation(this.bot, entity).plus(entity.position))) {
+        if (swing) this.swingAttack()
+        return false
+      }
       // the attack packet, then the swing (1.8: the swing first; 26.3: a punch); 1.21.11+ spectators do not swing
-      ;(this.bot.attack as (entity: Entity, swing?: boolean) => void)(entity, !(spectator && v['>=']('1.21.11')))
+      ;(this.bot.attack as (entity: Entity, swing?: boolean) => void)(entity, swing)
+      if (!spectator || v['>=']('26.1')) this.attackStrengthTicker = 0
       return false
     }
     // 1.8 swings before anything else
@@ -389,8 +426,10 @@ export class MouseManager {
       this.destroyedLocally = false
       this.startDestroyBlock(cursorBlock)
       instant = this.destroyedLocally
-    } else if (this.bot.game.gameMode !== 'creative') {
-      this.missTime = 10
+    } else {
+      if (this.bot.game.gameMode !== 'creative') this.missTime = 10
+      // a miss resets the attack strength
+      this.attackStrengthTicker = 0
     }
     if (v['>=']('1.9') && !(spectator && v['>=']('1.21.11'))) this.swingAttack()
     return instant
@@ -448,7 +487,7 @@ export class MouseManager {
     if (this.entityRaycastCache?.key === key) {
       return this.entityRaycastCache.entity
     }
-    const entity = raycastEntity(this.bot)
+    const entity = raycastEntity(this.bot, undefined, this.attackRange())
     this.entityRaycastCache = { key, entity }
     return entity
   }
@@ -600,6 +639,7 @@ export class MouseManager {
   private stopDestroyBlock() {
     if (!this.isDestroyingBlock) return
     this.writeDig('abort', this.destroyBlockPos!, 0)
+    this.attackStrengthTicker = 0
     this.isDestroyingBlock = false
     this.destroyProgress = 0
     this.breakStartTime = undefined

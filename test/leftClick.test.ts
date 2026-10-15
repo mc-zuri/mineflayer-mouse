@@ -198,6 +198,9 @@ describe.each(representativeVersions)('%s spectator and spear left click', (v) =
   it.runIf(atLeast(v, '1.21.11'))('a spear stabs (STAB at the origin) instead of mining, and holding does nothing', () => {
     const f = createFakeBot(v).inject().hold('iron_spear')
     f.lookAtBlock('stone')
+    // charged: an iron spear needs 19 ticks since the last attack (or the item switch)
+    f.tick(20)
+    f.take()
     f.pressLeft().tick(5)
     const packets = f.take()
     expect(packets.map(p => p.name)).toEqual(atLeast(v, '26.3') ? ['block_dig'] : ['block_dig', 'arm_animation'])
