@@ -6,7 +6,7 @@ import { Block } from 'prismarine-block'
 import { EventEmitter } from 'events'
 import { debug } from './debug'
 import { getEntityHitLocation, raycastEntity } from './entityRaycast'
-import { getBlockReach } from './botCommon'
+import { getBlockReach, getBotEyeHeight, getEntityReach } from './botCommon'
 import { getLatestEntityName } from './attackableEntity'
 import { WorldBorderTracker } from './worldBorder'
 import { AttackRange, getAttackRange, getMinimumAttackCharge, isInAttackRange, getAttackSpeed } from './attackGates'
@@ -726,7 +726,8 @@ export class MouseManager {
     if (entity && v['>=']('1.18') && !this.worldBorder.isWithinBounds(entity.position.x, entity.position.z)) return
     for (const hand of hands) {
       const item = this.itemInHand(hand)
-      if (entity) {
+      // 1.21.11+: an entity beyond the interaction range (picked with a spear's reach) is not interacted with
+      if (entity && (v['<']('1.21.11') || this.isWithinEntityInteractionRange(entity))) {
         const result = this.interactEntity(entity, hand)
         if (consumesAction(result)) {
           this.swingForUse(hand, result, 'entity')
@@ -750,6 +751,18 @@ export class MouseManager {
         }
       }
     }
+  }
+
+  /** Player.isWithinEntityInteractionRange: the entity's box within the interaction range of the eyes */
+  private isWithinEntityInteractionRange(entity: Entity) {
+    const eye = this.bot.entity.position.offset(0, getBotEyeHeight(this.bot), 0)
+    const w = (entity.width ?? 0) / 2
+    const p = entity.position
+    const dx = Math.max(p.x - w - eye.x, 0, eye.x - (p.x + w))
+    const dy = Math.max(p.y - eye.y, 0, eye.y - (p.y + (entity.height ?? 0)))
+    const dz = Math.max(p.z - w - eye.z, 0, eye.z - (p.z + w))
+    const range = getEntityReach(this.bot)
+    return dx * dx + dy * dy + dz * dz < range * range
   }
 
   /** the plugin's own guards and mineflayer interact methods, which replace the vanilla click */

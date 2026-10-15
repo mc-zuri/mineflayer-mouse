@@ -80,3 +80,13 @@ describe.each(representativeVersions.filter(v => atLeast(v, '1.21.11')))('%s att
     }
   })
 })
+
+describe.each(representativeVersions.filter(v => atLeast(v, '1.21.11')))('%s entity interaction range', (v) => {
+  it('a cow picked 4 blocks away with a spear is not interacted with: the spear is used', () => {
+    const f = createFakeBot(v).inject().hold('iron_spear')
+    const cow = f.lookAtEntity('cow')
+    cow.position = cow.position.offset(0, 0, -(4 - 2) - cow.width / 2)
+    f.pressRight()
+    expect(f.takeCompact()).toEqual(['use_item(hand=0)'])
+  })
+})
