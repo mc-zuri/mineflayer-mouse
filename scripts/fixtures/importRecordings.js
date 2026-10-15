@@ -31,7 +31,7 @@ const CLICK_PACKETS = new Set(['block_place', 'use_item', 'arm_animation', 'use_
 // the server packets a replay feeds back: the world border, riding, the selected slot
 const SERVER_STATE_PACKETS = new Set(['world_border', 'initialize_world_border', 'world_border_center', 'world_border_size', 'world_border_lerp_size', 'set_passengers', 'held_item_slot'])
 // the input keys a replay presses: the buttons, sneaking, the movement keys (paddling) and the middle button (pick)
-const INPUT_KEYS = ['use', 'attack', 'sneak', 'forward', 'back', 'left', 'right', 'pickItem']
+const INPUT_KEYS = ['use', 'attack', 'sneak', 'forward', 'back', 'left', 'right', 'pickItem', ...Array.from({ length: 9 }, (_, i) => `hotbar${i + 1}`)]
 
 const round = (n) => (typeof n === 'number' && !Number.isInteger(n) ? Math.round(n * 1e6) / 1e6 : n)
 function clean (v) {
@@ -113,6 +113,68 @@ function importCase (file, version) {
   // entities: the summoned ones, by the ids the packets name
   const summons = rec.setup?.summon ?? []
   const entities = {}
+  // a summoned entity no packet names gets an id of its own
+  const summonIds = summons.map((_, i) => 1000 + i)
+
+  /**
+   * The crosshair, when no packet names what it was on (a pick block before 1.21.4, a click that sent nothing): the
+   * look from the eyes through the world's blocks (full cubes) and the summoned entities, 4.5 blocks
+   */
+  const playerPos = rec.start?.pos ?? rec.at
+  const crosshair = (look, sneaking) => {
+    if (!playerPos || !fills.length) return null
+    const eye = [playerPos[0], playerPos[1] + (sneaking ? (version.startsWith('1.8') || /^1\.(9|10|11|12|13)/.test(version) ? 1.54 : 1.27) : 1.62), playerPos[2]]
+    const yaw = look[0] * Math.PI / 180
+    const pitch = look[1] * Math.PI / 180
+    const dir = [-Math.sin(yaw) * Math.cos(pitch), -Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch)]
+    const reach = (rec.gamemode ?? rec.start?.gameMode) === 'creative' ? 5 : 4.5
+    // the nearest summoned entity on the ray
+    let entityHit = null
+    summons.forEach((summon, i) => {
+      const at = [origin[0] + summon.at[0], origin[1] + summon.at[1], origin[2] + summon.at[2]]
+      const e = data.entitiesByName[summon.entity]
+      if (!e) return
+      const w = (e.width ?? 0.6) / 2
+      const box = [at[0] - w, at[1], at[2] - w, at[0] + w, at[1] + (e.height ?? 1), at[2] + w]
+      let t0 = 0
+      let t1 = reach
+      for (let a = 0; a < 3; a++) {
+        if (Math.abs(dir[a]) < 1e-9) { if (eye[a] < box[a] || eye[a] > box[a + 3]) { t0 = Infinity; break } continue }
+        let ta = (box[a] - eye[a]) / dir[a]
+        let tb = (box[a + 3] - eye[a]) / dir[a]
+        if (ta > tb) [ta, tb] = [tb, ta]
+        t0 = Math.max(t0, ta)
+        t1 = Math.min(t1, tb)
+      }
+      if (t0 <= t1 && (!entityHit || t0 < entityHit.t)) entityHit = { t: t0, id: summonIds[i], entity: summon.entity }
+    })
+    // the first block on the ray (Amanatides - Woo)
+    const pos = eye.map(Math.floor)
+    const step = dir.map(d => (d > 0 ? 1 : -1))
+    const tDelta = dir.map(d => (Math.abs(d) < 1e-9 ? Infinity : Math.abs(1 / d)))
+    const tMax = dir.map((d, a) => (Math.abs(d) < 1e-9 ? Infinity : (d > 0 ? pos[a] + 1 - eye[a] : eye[a] - pos[a]) / Math.abs(d)))
+    let t = 0
+    let face = -1
+    while (t <= reach) {
+      const state = stateAt({ x: pos[0], y: pos[1], z: pos[2] })
+      if (state && state !== 0 && face !== -1) {
+        if (entityHit && entityHit.t < t) break
+        const hit = eye.map((e, a) => e + dir[a] * t - pos[a])
+        return { block: { stateId: state, pos: [...pos], face, hit } }
+      }
+      const a = tMax[0] < tMax[1] ? (tMax[0] < tMax[2] ? 0 : 2) : (tMax[1] < tMax[2] ? 1 : 2)
+      t = tMax[a]
+      pos[a] += step[a]
+      tMax[a] += tDelta[a]
+      // the face entered: down 0, up 1, north 2, south 3, west 4, east 5
+      face = a === 1 ? (step[1] > 0 ? 0 : 1) : a === 2 ? (step[2] > 0 ? 2 : 3) : (step[0] > 0 ? 4 : 5)
+    }
+    if (entityHit) {
+      entities[entityHit.id] ??= entityHit.entity
+      return { entity: entityHit.id }
+    }
+    return null
+  }
 
   const inventory = {}
   for (const [slot, item] of Object.entries(rec.setup?.inventory ?? {})) inventory[slot] = [item.id, item.count ?? 1]
@@ -161,7 +223,14 @@ function importCase (file, version) {
       // the block went away (broken): nothing known under the crosshair
       if (stateAt({ x, y, z }) === 0 && !packets.some(p => p.name === 'block_dig' && p.params.status === 0)) target = null
     }
+    for (const p of packets) {
+      if (p.name === 'block_dig' && ((p.params.status === 0 && (rec.gamemode ?? rec.start?.gameMode) === 'creative') || p.params.status === (version === '26.3' ? 3 : 2))) {
+        updates.set(key(p.params.location), 0)
+      }
+    }
     const keys = INPUT_KEYS.filter(k => inp[k] || (k === 'pickItem' && (inp.pick || inp.pickBlock || inp.middle)))
+    // a click nothing named a target for: what the crosshair met
+    if (!target && (keys.includes('pickItem') || keys.includes('use') || keys.includes('attack'))) target = crosshair(look, keys.includes('sneak'))
     // a swing from an inventory screen action (dropping an item) is not a click
     const inScreen = (tick.c ?? []).some(([, hex]) => /^(window_click|close_window)$/.test(decode(deserC, hex).name))
     if (inScreen && !keys.length) packets.splice(0, packets.length, ...packets.filter(p => p.name !== 'arm_animation'))
@@ -210,7 +279,11 @@ function importCase (file, version) {
   while (last > first && !active(ticks[last])) last--
   const kept = first < 0 ? [] : ticks.slice(first, last + 1)
   // the server state set before the first click (a world border, a ride) comes with the first kept tick
-  if (kept.length) kept[0] = { ...kept[0], server: [...ticks.slice(0, first).flatMap(t => t.server ?? []), ...(kept[0].server ?? [])] }
+  const setupServer = (rec.setupS ?? []).map(([, hex]) => decode(deserS, hex)).filter(p => SERVER_STATE_PACKETS.has(p.name)).map(p => [p.name, p.params])
+  for (const [name, params] of setupServer) {
+    if (name === 'set_passengers' && !entities[params.entityId]) entities[params.entityId] = rec.setup?.mount?.entity ?? 'oak_boat'
+  }
+  const initialServer = first < 0 ? [] : [...setupServer, ...ticks.slice(0, first).flatMap(t => t.server ?? [])]
 
   return {
     name: rec.name,
@@ -220,6 +293,8 @@ function importCase (file, version) {
     // the player's feet, where the blocks are measured from
     position: rec.start?.pos ?? rec.at ?? null,
     playerEntityId: rec.start?.netState?.entityId ?? null,
+    // the server's state packets before the first click (a world border, a ride)
+    initialServer,
     // the recordings keep no health packets: a scenario that gives the hunger effect leaves the player hungry
     food: rec.setup?.food ?? (JSON.stringify(rec.steps ?? []).includes('minecraft:hunger') ? 19 : undefined),
     selected: rec.setup?.selected ?? 0,

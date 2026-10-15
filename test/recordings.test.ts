@@ -27,6 +27,8 @@ interface Fixture {
   position?: [number, number, number] | null
   /** the player's entity id in the recording */
   playerEntityId?: number
+  /** the server's state packets before the first click */
+  initialServer?: Array<[string, any]>
   food?: number
   selected: number
   inventory: Record<string, [string, number]>
@@ -110,6 +112,7 @@ function replay(version: string, fixture: Fixture) {
   const first = fixture.ticks[0]!.t
   const last = fixture.ticks[fixture.ticks.length - 1]!.t
   const held = { use: false, attack: false, pickItem: false }
+  for (const [name, params] of fixture.initialServer ?? []) applyServerPacket(f, fixture, name, params)
   for (let t = first; t <= last; t++) {
     const tick = byTick.get(t)
     const input = tick?.in ?? []
@@ -130,6 +133,9 @@ function replay(version: string, fixture: Fixture) {
     }
     f.sneak(input.includes('sneak'))
     for (const key of ['forward', 'back', 'left', 'right'] as const) f.bot.setControlState(key, input.includes(key))
+    // a hotbar key selects the slot (its packet goes with the next tick)
+    const hotbar = input.find(k => /^hotbar\d$/.test(k))
+    if (hotbar) f.bot.quickBarSlot = Number(hotbar.slice(6)) - 1
     if (tick?.food !== undefined) f.bot.food = tick.food
     // the clicks since the last tick, then the tick (they belong to it, as to vanilla's handleKeybinds)
     for (const button of ['attack', 'use', 'pickItem'] as const) {
