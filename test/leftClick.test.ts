@@ -136,6 +136,20 @@ describe.each(representativeVersions)('%s left click', (v) => {
     expect(f.takeCompact()).toEqual([status(v, 'abort')])
   })
 
+  it('the break is a prediction of the STOP sequence (1.19+; none before): the server acknowledgement puts a refused one back', () => {
+    const f = bot()
+    const predicted: Array<[string, number, number | null]> = []
+    ;(f.bot as any)._predictBlockState = (p: Vec3, stateId: number, sequence: number | null) => {
+      predicted.push([p.toString(), stateId, sequence])
+      f.bot.world.setBlockStateId(p, stateId)
+    }
+    dig(f)
+    f.pressLeft().tick(40)
+    const stop = f.take().find(p => p.name === 'block_dig' && p.params.status === (atLeast(v, '26.3') ? 3 : 2))
+    expect(stop).toBeDefined()
+    expect(predicted).toEqual([[pos.toString(), 0, atLeast(v, '1.19') ? stop!.params.sequence : null]])
+  })
+
   it('mines the block again when it comes back at the same position', () => {
     const f = bot().hold(null)
     f.lookAtBlock('torch', { position: pos })

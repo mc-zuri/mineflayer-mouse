@@ -533,15 +533,18 @@ export class MouseManager {
     }
   }
 
-  private writeDig(action: 'start' | 'abort' | 'stop' | 'changeDirection', position: Vec3, face: number) {
+  /** sends the action; returns the prediction sequence it carries (START and STOP from 1.19), else undefined */
+  private writeDig(action: 'start' | 'abort' | 'stop' | 'changeDirection', position: Vec3, face: number): number | undefined {
     const predicted = action === 'start' || action === 'stop'
+    const sequence = predicted ? this.nextSequence() : 0
     this.bot._client.write('block_dig', {
       status: this.digStatus(action),
       location: position,
       face,
       // 1.19+: START and STOP carry the prediction sequence, the others 0
-      sequence: predicted ? this.nextSequence() : 0
+      sequence
     })
+    return predicted && this.versionCompare['>=']('1.19') ? sequence : undefined
   }
 
   /** the item, as sameDestroyTarget compares it (another item restarts the mining) */
@@ -563,16 +566,24 @@ export class MouseManager {
     return this.bot.game.gameMode === 'creative'
   }
 
-  /** MultiPlayerGameMode.destroyBlock: the local prediction of the break */
-  private destroyBlockLocally(block: Block) {
+  /**
+   * MultiPlayerGameMode.destroyBlock: the local prediction of the break. From 1.19 it's made inside the action's
+   * prediction (MultiPlayerGameMode.startPrediction with the START's or STOP's sequence): the block is air until the
+   * server acknowledges that sequence, then whatever the server has (BlockStatePredictionHandler.endPredictionsUpTo).
+   * A break the server refused (spawn protection, a claim) puts the block back; set as the server's own state it
+   * stayed air in the client's world, a block the bot walked into and was teleported back from.
+   */
+  private destroyBlockLocally(block: Block, sequence?: number) {
     const position = block.position
     this.brokenBlocks = [...this.brokenBlocks.slice(-5), block]
     this.destroyedLocally = true
     this.debugDigStatus = 'success'
     if (this.currentBreakBlock) this.resetDiggingVisual(this.currentBreakBlock.block)
     if (!this.settings.noBreakPositiveUpdate) {
+      const predictBlockState = (this.bot as any)._predictBlockState
       const updateBlockState = (this.bot as any)._updateBlockState
-      if (typeof updateBlockState === 'function') updateBlockState(position, 0)
+      if (typeof predictBlockState === 'function') predictBlockState(position, 0, sequence ?? null)
+      else if (typeof updateBlockState === 'function') updateBlockState(position, 0)
       else this.bot.world.setBlockStateId?.(position, 0)
     }
     this.bot.emit('diggingCompleted', block)
@@ -583,8 +594,7 @@ export class MouseManager {
     if (!this.worldBorder.isWithinBounds(block.position.x, block.position.z)) return false
     const face: number = (block as any).face ?? 1
     if (this.isCreativeDestroy()) {
-      this.writeDig('start', block.position, face)
-      this.destroyBlockLocally(block)
+      this.destroyBlockLocally(block, this.writeDig('start', block.position, face))
       this.destroyDelay = 5
       return true
     }
@@ -598,10 +608,10 @@ export class MouseManager {
     this.bot.emit('botArmSwingStart', 'right')
     if (this.destroyProgressPerTick(block) >= 1) {
       // an instant break: START only, never a STOP, no destroy delay
-      this.writeDig('start', block.position, face)
+      const sequence = this.writeDig('start', block.position, face)
       this.isDestroyingBlock = false
       this.breakStartTime = undefined
-      this.destroyBlockLocally(block)
+      this.destroyBlockLocally(block, sequence)
     } else {
       this.writeDig('start', block.position, face)
       this.isDestroyingBlock = true
@@ -628,8 +638,7 @@ export class MouseManager {
     // creative breaks the block under the crosshair every 5 ticks while held, inside the world border
     if (this.isCreativeDestroy() && this.worldBorder.isWithinBounds(block.position.x, block.position.z)) {
       this.destroyDelay = 5
-      this.writeDig('start', block.position, (block as any).face ?? 1)
-      this.destroyBlockLocally(block)
+      this.destroyBlockLocally(block, this.writeDig('start', block.position, (block as any).face ?? 1))
       return true
     }
     if (this.isDestroyingBlock && this.sameDestroyTarget(block)) {
@@ -638,8 +647,7 @@ export class MouseManager {
       if (this.destroyProgress >= 1 - 1e-9) {
         this.isDestroyingBlock = false
         this.breakStartTime = undefined
-        this.writeDig('stop', block.position, face)
-        this.destroyBlockLocally(block)
+        this.destroyBlockLocally(block, this.writeDig('stop', block.position, face))
         this.destroyProgress = 0
         this.destroyDelay = 5
       } else {
